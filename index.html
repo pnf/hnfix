@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HackerNews Fixed</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            line-height: 1.4;
+            margin: 0;
+            padding: 5px;
+            background: #f6f6ef;
+            color: #000;
+        }
+
+        #header {
+            background: #ff6600;
+            padding: 6px 8px;
+            margin: -5px -5px 8px -5px;
+            color: #000;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+
+        #header h1 {
+            margin: 0;
+            font-size: 16px;
+            font-weight: bold;
+        }
+
+        #controls {
+            display: flex;
+            gap: 4px;
+            flex-wrap: wrap;
+        }
+
+        #controls button {
+            padding: 6px 10px;
+            border: none;
+            background: rgba(0,0,0,0.15);
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 12px;
+            color: #000;
+            font-weight: 500;
+        }
+
+        #controls button:active {
+            background: rgba(0,0,0,0.25);
+        }
+
+        #story {
+            background: #fff;
+            padding: 8px;
+            margin-bottom: 8px;
+            border: 1px solid #ccc;
+            border-radius: 3px;
+        }
+
+        #story h2 {
+            margin: 0 0 4px 0;
+            font-size: 14px;
+        }
+
+        #story a {
+            color: #000;
+            text-decoration: none;
+        }
+
+        #story .meta {
+            font-size: 11px;
+            color: #828282;
+        }
+
+        #comments {
+            margin-top: 8px;
+        }
+
+        .comment {
+            margin-left: 0;
+            margin-bottom: 8px;
+            background: #fff;
+            border: 1px solid #e0e0e0;
+            border-radius: 3px;
+            padding: 6px;
+        }
+
+        .comment.collapsed > .replies {
+            display: none;
+        }
+
+        .comment-header {
+            font-size: 11px;
+            color: #828282;
+            margin-bottom: 4px;
+            cursor: pointer;
+            user-select: none;
+            -webkit-user-select: none;
+            padding: 6px;
+            margin: -6px -6px 4px -6px;
+            background: #f8f8f8;
+            border-radius: 3px 3px 0 0;
+            min-height: 36px; /* Touch target */
+            display: flex;
+            align-items: center;
+        }
+
+        .comment-header:active {
+            background: #e8e8e8;
+        }
+
+        .comment.focused .comment-header {
+            background: #ffffcc;
+        }
+
+        .collapse-indicator {
+            display: inline-block;
+            margin-right: 6px;
+            font-weight: bold;
+            font-size: 12px;
+        }
+
+        .comment-body {
+            font-size: 13px;
+            word-wrap: break-word;
+        }
+
+        .comment-body p {
+            margin: 0 0 6px 0;
+        }
+
+        .comment-body p:last-child {
+            margin-bottom: 0;
+        }
+
+        .replies {
+            margin-top: 6px;
+            padding-left: 10px;
+            border-left: 2px solid #e0e0e0;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 20px;
+            color: #828282;
+            font-size: 13px;
+        }
+
+        #loadingBar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: rgba(255, 102, 0, 0.3);
+            z-index: 1000;
+            overflow: hidden;
+            opacity: 0;
+            transition: opacity 0.15s;
+            pointer-events: none;
+        }
+
+        #loadingBar::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -50%;
+            width: 50%;
+            height: 100%;
+            background: #ff6600;
+        }
+
+        #loadingBar.active {
+            opacity: 1;
+        }
+
+        #loadingBar.active::before {
+            animation: loading 1.5s linear infinite;
+        }
+
+        @keyframes loading {
+            0% { left: -50%; }
+            100% { left: 100%; }
+        }
+
+        .error {
+            background: #ffe0e0;
+            border: 1px solid #ff0000;
+            padding: 8px;
+            border-radius: 3px;
+            color: #cc0000;
+            font-size: 13px;
+        }
+
+        #help {
+            font-size: 10px;
+            color: rgba(0,0,0,0.6);
+            margin-top: 4px;
+            flex-basis: 100%;
+        }
+
+        /* Mobile optimizations */
+        @media (max-width: 600px) {
+            #header h1 {
+                font-size: 14px;
+            }
+
+            #controls button {
+                font-size: 11px;
+                padding: 5px 8px;
+            }
+
+            .replies {
+                padding-left: 8px;
+            }
+
+            #help {
+                font-size: 9px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="loadingBar"></div>
+    <div id="header">
+        <h1>HackerNews Fixed</h1>
+        <div id="controls">
+            <button id="expandAll">Expand All</button>
+            <button id="collapseAll">Collapse All</button>
+            <button id="collapseDepth2">Depth 2+</button>
+            <button id="collapseDepth3">Depth 3+</button>
+        </div>
+        <div id="help">
+            Desktop: ↑/↓ navigate, ←/→ collapse/expand, Space toggle | Mobile: Tap header to toggle
+        </div>
+    </div>
+
+    <div id="story"></div>
+    <div id="comments"></div>
+
+    <script>
+        const API_BASE = 'https://hacker-news.firebaseio.com/v0';
+
+        // State
+        let allComments = new Map(); // id -> comment data
+        let commentElements = []; // Array of DOM elements for keyboard nav
+        let currentFocusIndex = -1;
+        let globalCollapseState = null; // null, 'all', or depth number
+        let isLoading = false;
+
+        // Get story ID from URL parameter
+        function getStoryId() {
+            const params = new URLSearchParams(window.location.search);
+            return params.get('id');
+        }
+
+        // Fetch item from HN API
+        async function fetchItem(id) {
+            const response = await fetch(`${API_BASE}/item/${id}.json`);
+            if (!response.ok) throw new Error('Failed to fetch item');
+            return response.json();
+        }
+
+        // Recursively fetch comment tree
+        async function fetchCommentTree(commentId) {
+            const comment = await fetchItem(commentId);
+            if (!comment || comment.deleted || comment.dead) return null;
+
+            allComments.set(commentId, comment);
+
+            if (comment.kids && comment.kids.length > 0) {
+                comment.children = [];
+                for (const kidId of comment.kids) {
+                    const kid = await fetchCommentTree(kidId);
+                    if (kid) comment.children.push(kid);
+                }
+            }
+
+            return comment;
+        }
+
+        // Format timestamp
+        function timeAgo(timestamp) {
+            const seconds = Math.floor(Date.now() / 1000) - timestamp;
+            const minutes = Math.floor(seconds / 60);
+            const hours = Math.floor(minutes / 60);
+            const days = Math.floor(hours / 24);
+
+            if (days > 0) return `${days}d ago`;
+            if (hours > 0) return `${hours}h ago`;
+            if (minutes > 0) return `${minutes}m ago`;
+            return 'just now';
+        }
+
+        // Render story
+        function renderStory(story) {
+            const storyEl = document.getElementById('story');
+            const url = story.url || `https://news.ycombinator.com/item?id=${story.id}`;
+
+            storyEl.innerHTML = `
+                <h2><a href="${url}" target="_blank">${story.title}</a></h2>
+                <div class="meta">
+                    ${story.score} points by ${story.by} ${timeAgo(story.time)} | ${story.descendants || 0} comments
+                </div>
+            `;
+        }
+
+        // Render comment recursively
+        function renderComment(comment, depth = 0) {
+            const div = document.createElement('div');
+            div.className = 'comment';
+            div.dataset.id = comment.id;
+            div.dataset.depth = depth;
+
+            const hasReplies = comment.children && comment.children.length > 0;
+            div.dataset.hasReplies = hasReplies;
+
+            const collapseIndicator = hasReplies ?
+                '<span class="collapse-indicator">[-]</span>' :
+                '<span class="collapse-indicator">[·]</span>';
+            const replyCount = hasReplies ? ` (${countReplies(comment)} ${countReplies(comment) === 1 ? 'reply' : 'replies'})` : '';
+
+            div.innerHTML = `
+                <div class="comment-header">
+                    ${collapseIndicator}
+                    <span>${comment.by} ${timeAgo(comment.time)}${replyCount}</span>
+                </div>
+                <div class="comment-body">${comment.text || '[deleted]'}</div>
+            `;
+
+            // Add to navigation array
+            commentElements.push(div);
+
+            // Toggle collapse on header click (only if has replies)
+            const header = div.querySelector('.comment-header');
+            header.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (hasReplies) {
+                    toggleCollapse(div);
+                }
+            });
+
+            // Render replies
+            if (comment.children && comment.children.length > 0) {
+                const repliesDiv = document.createElement('div');
+                repliesDiv.className = 'replies';
+
+                for (const child of comment.children) {
+                    repliesDiv.appendChild(renderComment(child, depth + 1));
+                }
+
+                div.appendChild(repliesDiv);
+            }
+
+            // Apply global collapse state if set
+            if (hasReplies && globalCollapseState !== null) {
+                if (globalCollapseState === 'all' ||
+                    (typeof globalCollapseState === 'number' && depth >= globalCollapseState)) {
+                    div.classList.add('collapsed');
+                    div.querySelector('.collapse-indicator').textContent = '[+]';
+                }
+            }
+
+            return div;
+        }
+
+        // Count total replies in thread
+        function countReplies(comment) {
+            if (!comment.children || comment.children.length === 0) return 0;
+            let count = comment.children.length;
+            for (const child of comment.children) {
+                count += countReplies(child);
+            }
+            return count;
+        }
+
+        // Toggle collapse state
+        function toggleCollapse(commentEl) {
+            const isCollapsed = commentEl.classList.toggle('collapsed');
+            const indicator = commentEl.querySelector('.collapse-indicator');
+            indicator.textContent = isCollapsed ? '[+]' : '[-]';
+            // User manually toggled, clear global state
+            if (!isLoading) {
+                globalCollapseState = null;
+            }
+        }
+
+        // Collapse/expand functions
+        function expandAll() {
+            globalCollapseState = null;
+            document.querySelectorAll('.comment.collapsed').forEach(el => {
+                if (el.dataset.hasReplies === 'true') {
+                    el.classList.remove('collapsed');
+                    el.querySelector('.collapse-indicator').textContent = '[-]';
+                }
+            });
+        }
+
+        function collapseAll() {
+            globalCollapseState = 'all';
+            document.querySelectorAll('.comment').forEach(el => {
+                if (el.dataset.hasReplies === 'true') {
+                    el.classList.add('collapsed');
+                    el.querySelector('.collapse-indicator').textContent = '[+]';
+                }
+            });
+        }
+
+        function collapseByDepth(minDepth) {
+            globalCollapseState = minDepth;
+            document.querySelectorAll('.comment').forEach(el => {
+                if (el.dataset.hasReplies === 'true') {
+                    const depth = parseInt(el.dataset.depth);
+                    if (depth >= minDepth) {
+                        el.classList.add('collapsed');
+                        el.querySelector('.collapse-indicator').textContent = '[+]';
+                    } else {
+                        el.classList.remove('collapsed');
+                        el.querySelector('.collapse-indicator').textContent = '[-]';
+                    }
+                }
+            });
+        }
+
+        // Keyboard navigation
+        function focusComment(index) {
+            if (index < 0 || index >= commentElements.length) return;
+
+            // Remove previous focus
+            if (currentFocusIndex >= 0 && commentElements[currentFocusIndex]) {
+                commentElements[currentFocusIndex].classList.remove('focused');
+            }
+
+            currentFocusIndex = index;
+            const element = commentElements[index];
+            element.classList.add('focused');
+            element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+
+        function nextVisibleComment(startIndex, direction) {
+            let index = startIndex + direction;
+            while (index >= 0 && index < commentElements.length) {
+                const el = commentElements[index];
+                // Check if comment is visible (not hidden by collapsed parent)
+                if (el.offsetParent !== null) {
+                    return index;
+                }
+                index += direction;
+            }
+            return startIndex;
+        }
+
+        // Keyboard event handler
+        document.addEventListener('keydown', (e) => {
+            if (commentElements.length === 0) return;
+
+            // Initialize focus on first use
+            if (currentFocusIndex === -1 && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+                focusComment(0);
+                e.preventDefault();
+                return;
+            }
+
+            switch(e.key) {
+                case 'ArrowDown':
+                case 'j':
+                    focusComment(nextVisibleComment(currentFocusIndex, 1));
+                    e.preventDefault();
+                    break;
+                case 'ArrowUp':
+                case 'k':
+                    focusComment(nextVisibleComment(currentFocusIndex, -1));
+                    e.preventDefault();
+                    break;
+                case 'ArrowLeft':
+                case 'h':
+                    if (currentFocusIndex >= 0) {
+                        const el = commentElements[currentFocusIndex];
+                        if (el.dataset.hasReplies === 'true' && !el.classList.contains('collapsed')) {
+                            toggleCollapse(el);
+                        }
+                    }
+                    e.preventDefault();
+                    break;
+                case 'ArrowRight':
+                case 'l':
+                    if (currentFocusIndex >= 0) {
+                        const el = commentElements[currentFocusIndex];
+                        if (el.dataset.hasReplies === 'true' && el.classList.contains('collapsed')) {
+                            toggleCollapse(el);
+                        }
+                    }
+                    e.preventDefault();
+                    break;
+                case ' ':
+                    if (currentFocusIndex >= 0) {
+                        const el = commentElements[currentFocusIndex];
+                        if (el.dataset.hasReplies === 'true') {
+                            toggleCollapse(el);
+                        }
+                    }
+                    e.preventDefault();
+                    break;
+            }
+        });
+
+        // Button handlers
+        document.getElementById('expandAll').addEventListener('click', expandAll);
+        document.getElementById('collapseAll').addEventListener('click', collapseAll);
+        document.getElementById('collapseDepth2').addEventListener('click', () => collapseByDepth(2));
+        document.getElementById('collapseDepth3').addEventListener('click', () => collapseByDepth(3));
+
+        // Loading bar helpers
+        function showLoadingBar() {
+            isLoading = true;
+            document.getElementById('loadingBar').classList.add('active');
+        }
+
+        function hideLoadingBar() {
+            isLoading = false;
+            document.getElementById('loadingBar').classList.remove('active');
+        }
+
+        // Main initialization
+        async function init() {
+            const storyId = getStoryId();
+
+            if (!storyId) {
+                document.getElementById('story').innerHTML = `
+                    <div class="error">
+                        <strong>No story ID provided</strong><br>
+                        Usage: index.html?id=12345<br>
+                        Get story IDs from <a href="https://news.ycombinator.com">news.ycombinator.com</a>
+                    </div>
+                `;
+                return;
+            }
+
+            try {
+                showLoadingBar();
+                document.getElementById('comments').innerHTML = '<div class="loading">Loading story...</div>';
+
+                // Small delay to ensure loading bar is visible
+                await new Promise(resolve => setTimeout(resolve, 50));
+
+                // Fetch story
+                const story = await fetchItem(storyId);
+                if (!story) throw new Error('Story not found');
+
+                renderStory(story);
+
+                if (!story.kids || story.kids.length === 0) {
+                    document.getElementById('comments').innerHTML = '<div class="loading">No comments yet</div>';
+                    hideLoadingBar();
+                    return;
+                }
+
+                document.getElementById('comments').innerHTML = '<div class="loading">Loading comments...</div>';
+
+                // Fetch and render all comments
+                const commentsContainer = document.getElementById('comments');
+                commentsContainer.innerHTML = '';
+
+                for (const kidId of story.kids) {
+                    const comment = await fetchCommentTree(kidId);
+                    if (comment) {
+                        commentsContainer.appendChild(renderComment(comment));
+                    }
+                }
+
+                if (commentsContainer.children.length === 0) {
+                    commentsContainer.innerHTML = '<div class="loading">No comments available</div>';
+                }
+
+                hideLoadingBar();
+
+            } catch (error) {
+                hideLoadingBar();
+                document.getElementById('comments').innerHTML = `
+                    <div class="error">
+                        <strong>Error loading story:</strong> ${error.message}
+                    </div>
+                `;
+            }
+        }
+
+        // Start the app
+        init();
+    </script>
+</body>
+</html>
