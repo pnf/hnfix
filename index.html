@@ -200,6 +200,50 @@
             font-size: 13px;
         }
 
+        #inputForm {
+            background: #fff;
+            padding: 15px;
+            border: 1px solid #ccc;
+            border-radius: 3px;
+        }
+
+        #inputForm h2 {
+            margin: 0 0 10px 0;
+            font-size: 14px;
+        }
+
+        #inputForm input {
+            width: 100%;
+            padding: 10px;
+            font-size: 14px;
+            border: 1px solid #ccc;
+            border-radius: 3px;
+            box-sizing: border-box;
+            margin-bottom: 10px;
+        }
+
+        #inputForm button {
+            width: 100%;
+            padding: 10px;
+            font-size: 14px;
+            background: #ff6600;
+            color: #fff;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+            font-weight: 500;
+        }
+
+        #inputForm button:active {
+            background: #e65c00;
+        }
+
+        #inputForm .hint {
+            font-size: 11px;
+            color: #828282;
+            margin-top: 8px;
+        }
+
         #help {
             font-size: 10px;
             color: rgba(0,0,0,0.6);
@@ -260,6 +304,59 @@
         function getStoryId() {
             const params = new URLSearchParams(window.location.search);
             return params.get('id');
+        }
+
+        // Extract ID from input (plain number or URL)
+        function extractId(input) {
+            input = input.trim();
+            // Check if it's just a number
+            if (/^\d+$/.test(input)) {
+                return input;
+            }
+            // Try to extract from URL pattern ending with non-digit + digits
+            const match = input.match(/\D(\d+)$/);
+            if (match) {
+                return match[1];
+            }
+            return null;
+        }
+
+        // Show input form
+        function showInputForm() {
+            document.getElementById('story').innerHTML = `
+                <div id="inputForm">
+                    <h2>Enter HackerNews Story ID or URL</h2>
+                    <input type="text" id="storyInput" placeholder="e.g., 39282028 or https://news.ycombinator.com/item?id=39282028" />
+                    <button id="loadButton">Load Story</button>
+                    <div class="hint">
+                        Paste a story ID or URL from <a href="https://news.ycombinator.com" target="_blank">news.ycombinator.com</a>
+                    </div>
+                </div>
+            `;
+
+            const input = document.getElementById('storyInput');
+            const button = document.getElementById('loadButton');
+
+            const loadStory = () => {
+                const value = input.value;
+                const id = extractId(value);
+                if (id) {
+                    // Reload page with ID parameter
+                    window.location.href = `?id=${id}`;
+                } else {
+                    alert('Please enter a valid story ID or URL');
+                }
+            };
+
+            button.addEventListener('click', loadStory);
+            input.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    loadStory();
+                }
+            });
+
+            // Focus the input
+            input.focus();
         }
 
         // Fetch item from HN API
@@ -534,13 +631,7 @@
             const storyId = getStoryId();
 
             if (!storyId) {
-                document.getElementById('story').innerHTML = `
-                    <div class="error">
-                        <strong>No story ID provided</strong><br>
-                        Usage: index.html?id=12345<br>
-                        Get story IDs from <a href="https://news.ycombinator.com">news.ycombinator.com</a>
-                    </div>
-                `;
+                showInputForm();
                 return;
             }
 
