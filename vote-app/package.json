@@ -1,0 +1,14 @@
+{
+  "name": "liberty-cafe-voter",
+  "version": "1.0.0",
+  "description": "Votes for Liberty Cafe in Best of Renton 2026 ballot",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "playwright": "^1.40.0"
+  }
+}

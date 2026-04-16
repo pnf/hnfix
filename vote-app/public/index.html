@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Best of Renton 2026 — Liberty Cafe Voter</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --red: #8B0000;
+      --red-light: #c0392b;
+      --gold: #e67e22;
+      --bg: #f5f5f0;
+      --card: #ffffff;
+      --border: #ddd;
+      --text: #222;
+      --muted: #666;
+      --success: #27ae60;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 32px 16px;
+    }
+
+    .hero {
+      text-align: center;
+      margin-bottom: 32px;
+      max-width: 580px;
+    }
+
+    .hero .badge {
+      display: inline-block;
+      background: var(--gold);
+      color: white;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      padding: 4px 12px;
+      border-radius: 20px;
+      margin-bottom: 14px;
+    }
+
+    .hero h1 {
+      font-size: 28px;
+      font-weight: 800;
+      color: var(--red);
+      line-height: 1.2;
+      margin-bottom: 10px;
+    }
+
+    .hero p {
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.6;
+    }
+
+    .hero .highlight {
+      color: var(--red);
+      font-weight: 600;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 32px;
+      width: 100%;
+      max-width: 480px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+    }
+
+    .card h2 {
+      font-size: 17px;
+      font-weight: 700;
+      color: var(--text);
+      margin-bottom: 6px;
+    }
+
+    .card .desc {
+      font-size: 13px;
+      color: var(--muted);
+      margin-bottom: 24px;
+      line-height: 1.5;
+    }
+
+    .form-group {
+      margin-bottom: 18px;
+    }
+
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 6px;
+    }
+
+    label .req { color: var(--red); }
+    label .opt { color: var(--muted); font-weight: 400; }
+
+    input {
+      width: 100%;
+      padding: 10px 14px;
+      border: 1.5px solid var(--border);
+      border-radius: 8px;
+      font-size: 14px;
+      color: var(--text);
+      background: #fafafa;
+      transition: border-color 0.15s, box-shadow 0.15s;
+      outline: none;
+    }
+
+    input:focus {
+      border-color: var(--red);
+      box-shadow: 0 0 0 3px rgba(139,0,0,0.1);
+      background: #fff;
+    }
+
+    .name-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .submit-btn {
+      width: 100%;
+      padding: 13px;
+      background: linear-gradient(135deg, var(--red) 0%, var(--red-light) 100%);
+      color: white;
+      font-size: 15px;
+      font-weight: 700;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      margin-top: 8px;
+      transition: opacity 0.15s, transform 0.1s;
+    }
+
+    .submit-btn:hover { opacity: 0.92; }
+    .submit-btn:active { transform: scale(0.99); }
+    .submit-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+    /* Progress panel */
+    #progress-panel {
+      display: none;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 28px 32px;
+      width: 100%;
+      max-width: 480px;
+      box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+      margin-top: 0;
+    }
+
+    #progress-panel h2 {
+      font-size: 17px;
+      font-weight: 700;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .spinner {
+      width: 20px;
+      height: 20px;
+      border: 2.5px solid #ddd;
+      border-top-color: var(--red);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      flex-shrink: 0;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    #log-container {
+      background: #1a1a2e;
+      border-radius: 8px;
+      padding: 14px 16px;
+      max-height: 260px;
+      overflow-y: auto;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 12px;
+      line-height: 1.7;
+    }
+
+    .log-entry { color: #a8d8ea; }
+    .log-entry.success { color: #90ee90; }
+    .log-entry.error { color: #ff8080; }
+
+    #download-section {
+      display: none;
+      margin-top: 20px;
+      text-align: center;
+    }
+
+    .download-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 24px;
+      background: var(--success);
+      color: white;
+      font-size: 15px;
+      font-weight: 700;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      text-decoration: none;
+      transition: opacity 0.15s;
+    }
+
+    .download-btn:hover { opacity: 0.9; }
+
+    .reset-btn {
+      display: block;
+      margin: 14px auto 0;
+      background: none;
+      border: none;
+      color: var(--muted);
+      font-size: 13px;
+      cursor: pointer;
+      text-decoration: underline;
+    }
+
+    .ballot-info {
+      margin-top: 24px;
+      padding: 14px 16px;
+      background: #fff8f0;
+      border: 1px solid #f0d9b5;
+      border-radius: 8px;
+      font-size: 12.5px;
+      color: #7a5c2a;
+      line-height: 1.6;
+    }
+
+    .ballot-info strong { color: #5a3e1b; }
+
+    .category-preview {
+      margin-top: 20px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .category-preview summary {
+      cursor: pointer;
+      font-weight: 600;
+      color: var(--red);
+      margin-bottom: 8px;
+    }
+
+    .category-list {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 4px 16px;
+      padding-top: 8px;
+    }
+
+    .category-item { padding: 2px 0; }
+    .category-item .lib { color: var(--gold); font-weight: 600; }
+
+    @media (max-width: 500px) {
+      .name-row { grid-template-columns: 1fr; }
+      .category-list { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="hero">
+    <div class="badge">🏆 Best of Renton 2026</div>
+    <h1>Vote for <span>Liberty Cafe</span></h1>
+    <p>
+      This tool automatically casts your vote for
+      <span class="highlight">Liberty Cafe</span> in every Eat &amp; Drink
+      category where they're nominated, and selects a random entry in
+      categories where they're not.
+    </p>
+  </div>
+
+  <!-- Voter info form -->
+  <div class="card" id="form-card">
+    <h2>Your Voter Information</h2>
+    <p class="desc">
+      The ballot requires a valid email address. First &amp; last name and
+      ZIP code may also be requested.
+    </p>
+
+    <form id="vote-form">
+      <div class="name-row">
+        <div class="form-group">
+          <label>First Name <span class="opt">(optional)</span></label>
+          <input type="text" name="firstName" placeholder="Jane" autocomplete="given-name">
+        </div>
+        <div class="form-group">
+          <label>Last Name <span class="opt">(optional)</span></label>
+          <input type="text" name="lastName" placeholder="Smith" autocomplete="family-name">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Email Address <span class="req">*</span></label>
+        <input type="email" name="email" placeholder="jane@example.com"
+               autocomplete="email" required>
+      </div>
+
+      <div class="form-group">
+        <label>ZIP Code <span class="opt">(optional)</span></label>
+        <input type="text" name="zip" placeholder="98055" maxlength="10"
+               inputmode="numeric" autocomplete="postal-code">
+      </div>
+
+      <button type="submit" class="submit-btn" id="submit-btn">
+        🗳️ Cast My Votes Now
+      </button>
+    </form>
+
+    <div class="ballot-info">
+      <strong>What gets voted?</strong> All 55 categories across 6 groups in the
+      Best of Renton 2026 ballot. Liberty Cafe is nominated in 9 categories
+      (Breakfast, Coffee Shop/Cafe, Bar, Sandwiches, French Fries, Bakery,
+      Date Spot, Customer Service, Women Owned Business).
+    </div>
+
+    <details class="category-preview">
+      <summary>View Eat &amp; Drink categories (18 total)</summary>
+      <div class="category-list" id="category-list">
+        <div class="category-item"><span class="lib">⭐</span> Bar</div>
+        <div class="category-item">BBQ</div>
+        <div class="category-item"><span class="lib">⭐</span> Breakfast</div>
+        <div class="category-item">Catering</div>
+        <div class="category-item"><span class="lib">⭐</span> Coffee Shop/Cafe</div>
+        <div class="category-item">Pizza</div>
+        <div class="category-item"><span class="lib">⭐</span> French Fries</div>
+        <div class="category-item"><span class="lib">⭐</span> Sandwiches</div>
+        <div class="category-item">Winery/Wine Shop</div>
+        <div class="category-item">Chinese Cuisine</div>
+        <div class="category-item">Indian Cuisine</div>
+        <div class="category-item">Italian Cuisine</div>
+        <div class="category-item">Japanese Cuisine</div>
+        <div class="category-item">Mexican Cuisine</div>
+        <div class="category-item">Thai Cuisine</div>
+        <div class="category-item">Vietnamese Cuisine</div>
+        <div class="category-item">Bartender</div>
+        <div class="category-item"><span class="lib">⭐</span> Bakery</div>
+      </div>
+    </details>
+  </div>
+
+  <!-- Progress panel (shown after submit) -->
+  <div id="progress-panel">
+    <h2>
+      <div class="spinner" id="spinner"></div>
+      <span id="progress-title">Casting votes…</span>
+    </h2>
+    <div id="log-container">
+      <div class="log-entry">Initializing…</div>
+    </div>
+    <div id="download-section">
+      <a id="pdf-link" href="#" class="download-btn" download>
+        📄 Download Voting PDF
+      </a>
+      <button class="reset-btn" onclick="resetForm()">Vote again with different info</button>
+    </div>
+  </div>
+
+  <script>
+    let jobId = null;
+    let pollInterval = null;
+
+    document.getElementById('vote-form').addEventListener('submit', async e => {
+      e.preventDefault();
+      const form = e.target;
+      const data = Object.fromEntries(new FormData(form));
+
+      if (!data.email) {
+        alert('Please enter your email address.');
+        return;
+      }
+
+      // Show progress panel
+      document.getElementById('form-card').style.display = 'none';
+      const panel = document.getElementById('progress-panel');
+      panel.style.display = 'block';
+      document.getElementById('submit-btn').disabled = true;
+
+      clearLog();
+      addLog('Submitting your voter information…');
+
+      try {
+        const res = await fetch('/vote', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams(data),
+        });
+        const json = await res.json();
+        jobId = json.jobId;
+        addLog('Voting job started — please wait…');
+        pollInterval = setInterval(pollStatus, 1500);
+      } catch (err) {
+        addLog('Error: ' + err.message, 'error');
+      }
+    });
+
+    async function pollStatus() {
+      if (!jobId) return;
+      try {
+        const res = await fetch(`/status/${jobId}`);
+        const data = await res.json();
+
+        // Update log display
+        const container = document.getElementById('log-container');
+        container.innerHTML = '';
+        for (const entry of data.log) {
+          const cls = entry.includes('Error') ? 'error'
+                    : entry.includes('✓') || entry.includes('Done') || entry.includes('success') ? 'success'
+                    : '';
+          addLog(entry.replace(/^\[.*?\]\s*/, ''), cls);
+        }
+
+        if (data.status === 'done') {
+          clearInterval(pollInterval);
+          document.getElementById('spinner').style.display = 'none';
+          document.getElementById('progress-title').textContent = '✅ Voting Complete!';
+          if (data.hasPdf) {
+            const link = document.getElementById('pdf-link');
+            link.href = `/pdf/${jobId}`;
+            document.getElementById('download-section').style.display = 'block';
+          }
+        } else if (data.status === 'error') {
+          clearInterval(pollInterval);
+          document.getElementById('spinner').style.display = 'none';
+          document.getElementById('progress-title').textContent = '❌ Error';
+          addLog('Error: ' + data.error, 'error');
+        }
+      } catch {}
+    }
+
+    function clearLog() {
+      document.getElementById('log-container').innerHTML = '';
+    }
+
+    function addLog(msg, cls = '') {
+      const container = document.getElementById('log-container');
+      const el = document.createElement('div');
+      el.className = 'log-entry' + (cls ? ' ' + cls : '');
+      el.textContent = msg;
+      container.appendChild(el);
+      container.scrollTop = container.scrollHeight;
+    }
+
+    function resetForm() {
+      clearInterval(pollInterval);
+      jobId = null;
+      document.getElementById('progress-panel').style.display = 'none';
+      document.getElementById('form-card').style.display = 'block';
+      document.getElementById('submit-btn').disabled = false;
+      document.getElementById('spinner').style.display = '';
+      document.getElementById('progress-title').textContent = 'Casting votes…';
+      document.getElementById('download-section').style.display = 'none';
+      document.getElementById('vote-form').reset();
+    }
+  </script>
+</body>
+</html>
