@@ -521,15 +521,31 @@ function log(job, msg) {
 }
 
 function findChromium() {
-  const candidates = [
+  // Check explicit env var first
+  if (process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH &&
+      fs.existsSync(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH)) {
+    return process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
+  }
+
+  // Fixed paths (local dev, CI)
+  const fixed = [
     '/opt/pw-browsers/chromium-1194/chrome-linux/chrome',
     '/opt/pw-browsers/chromium/chrome-linux/chrome',
-    process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
   ];
-  for (const c of candidates) {
-    if (c && fs.existsSync(c)) return c;
+  for (const c of fixed) {
+    if (fs.existsSync(c)) return c;
   }
-  return undefined; // let Playwright find it
+
+  // Playwright Docker image: /ms-playwright/chromium-NNNN/chrome-linux/chrome
+  const browsersRoot = process.env.PLAYWRIGHT_BROWSERS_PATH || '/ms-playwright';
+  if (fs.existsSync(browsersRoot)) {
+    for (const dir of fs.readdirSync(browsersRoot).sort().reverse()) {
+      const exe = `${browsersRoot}/${dir}/chrome-linux/chrome`;
+      if (fs.existsSync(exe)) return exe;
+    }
+  }
+
+  return undefined; // let Playwright auto-detect
 }
 
 // ── Start server ─────────────────────────────────────────────────────────────
