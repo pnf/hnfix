@@ -87,8 +87,9 @@ app.get('/debug/ballot', async (req, res) => {
   try {
     const ctx = await browser.newContext({ ignoreHTTPSErrors: true });
     const page = await ctx.newPage();
-    await page.goto(BALLOT_URL, { waitUntil: 'networkidle', timeout: 30000 });
-    await page.waitForTimeout(2000);
+    await page.goto(BALLOT_URL, { waitUntil: 'load', timeout: 60000 });
+    // Wait for Ember/SPA to bootstrap and render
+    await page.waitForTimeout(5000);
 
     const title = await page.title();
     const url = page.url();
@@ -177,7 +178,9 @@ async function voteViaUI(page, job, votePlan) {
       if (r.status() >= 300 && r.status() < 400 && r.url().includes('Best-of-Renton')) redirectCount++;
     });
 
-    await page.goto(BALLOT_URL, { waitUntil: 'networkidle', timeout: 30000 });
+    await page.goto(BALLOT_URL, { waitUntil: 'load', timeout: 60000 });
+    // Wait for Ember/SPA to bootstrap and render
+    await page.waitForTimeout(5000);
 
     if (redirectCount >= 8) {
       log(job, 'Redirect loop detected — UI voting unavailable in this environment.');
@@ -487,7 +490,7 @@ tr.lc td:first-child { border-left: 3px solid #e67e22; }
 // ── API data fetching ────────────────────────────────────────────────────────
 
 async function fetchBallotData(page) {
-  await page.goto(`${API_BASE}/`, { waitUntil: 'networkidle', timeout: 20000 });
+  await page.goto(`${API_BASE}/`, { waitUntil: 'load', timeout: 30000 });
 
   const apiHeaders = {
     'Accept': 'application/json',
