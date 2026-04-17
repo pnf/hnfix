@@ -18,6 +18,15 @@ const BALLOT_URL    = 'https://rentonreporter2.secondstreetapp.com/Best-of-Rento
 const API_BASE      = 'https://rentonreporter2.secondstreetapp.com';
 const TARGET_NAME   = 'liberty cafe';
 
+const LAUNCH_ARGS = [
+  '--no-sandbox',
+  '--disable-setuid-sandbox',
+  '--disable-dev-shm-usage',   // critical for Docker
+  '--disable-gpu',
+  '--ignore-certificate-errors',
+  '--single-process',
+];
+
 // ── In-memory job store ─────────────────────────────────────────────────────
 const jobs = new Map();
 
@@ -33,14 +42,16 @@ app.post('/vote', (req, res) => {
     email, firstName: firstName || '', lastName: lastName || '', zip: zip || '',
     log: [],
     pdfPath: null,
+    screenshotPath: null,
+    ballotHtml: null,
     error: null,
     startedAt: new Date().toISOString(),
   });
 
-  // Run in background
   performVoting(jobId).catch(err => {
     const job = jobs.get(jobId);
     if (job) { job.status = 'error'; job.error = err.message; }
+    console.error('performVoting error:', err);
   });
 
   res.json({ jobId });
@@ -54,6 +65,7 @@ app.get('/status/:jobId', (req, res) => {
     log: job.log,
     error: job.error,
     hasPdf: !!job.pdfPath,
+    hasScreenshot: !!job.screenshotPath,
   });
 });
 
@@ -61,6 +73,39 @@ app.get('/pdf/:jobId', (req, res) => {
   const job = jobs.get(req.params.jobId);
   if (!job || !job.pdfPath) return res.status(404).json({ error: 'PDF not ready' });
   res.download(job.pdfPath, `best-of-renton-votes-${req.params.jobId.slice(0, 8)}.pdf`);
+});
+
+app.get('/screenshot/:jobId', (req, res) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job || !job.screenshotPath) return res.status(404).json({ error: 'Screenshot not ready' });
+  res.sendFile(job.screenshotPath);
+});
+
+// Debug: explore the ballot page and return its structure
+app.get('/debug/ballot', async (req, res) => {
+  const browser = await chromium.launch({ headless: true, executablePath: findChromium(), args: LAUNCH_ARGS });
+  try {
+    const ctx = await browser.newContext({ ignoreHTTPSErrors: true });
+    const page = await ctx.newPage();
+    await page.goto(BALLOT_URL, { waitUntil: 'networkidle', timeout: 30000 });
+    await page.waitForTimeout(2000);
+
+    const title = await page.title();
+    const url = page.url();
+    const html = await page.content();
+    const screenshot = await page.screenshot({ fullPage: true });
+
+    await browser.close();
+    res.json({
+      title, url,
+      htmlLength: html.length,
+      htmlPreview: html.substring(0, 8000),
+      screenshotBase64: screenshot.toString('base64'),
+    });
+  } catch (err) {
+    await browser.close().catch(() => {});
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ── Voting orchestration ─────────────────────────────────────────────────────
@@ -72,13 +117,14 @@ async function performVoting(jobId) {
   const browser = await chromium.launch({
     headless: true,
     executablePath: findChromium(),
-    args: ['--ignore-certificate-errors', '--no-sandbox', '--disable-setuid-sandbox'],
+    args: LAUNCH_ARGS,
   });
 
   try {
     const context = await browser.newContext({ ignoreHTTPSErrors: true });
-    const dataPage = await context.newPage();
 
+    // 1. Fetch ballot data
+    const dataPage = await context.newPage();
     log(job, 'Fetching ballot categories and entries from API…');
     const { matchups, groups, entries } = await fetchBallotData(dataPage);
     await dataPage.close().catch(() => {});
@@ -88,21 +134,32 @@ async function performVoting(jobId) {
     const libertyCatCount = votePlan.filter(v => v.isLiberty).length;
     log(job, `Liberty Cafe found in ${libertyCatCount} categories; random picks for ${votePlan.length - libertyCatCount}`);
 
-    // Try UI voting first (may use the page; might leave it in an error state)
+    // 2. Try UI voting
     log(job, 'Attempting to load ballot page via browser…');
-    let uiPage = await context.newPage();
+    const uiPage = await context.newPage();
     const uiSuccess = await voteViaUI(uiPage, job, votePlan);
+
+    // Take a screenshot of the ballot page (for debugging)
+    try {
+      const screenshotDir = ensureDir(path.join(__dirname, 'pdfs'));
+      const screenshotPath = path.join(screenshotDir, `screenshot-${jobId}.png`);
+      await uiPage.screenshot({ path: screenshotPath, fullPage: true });
+      job.screenshotPath = screenshotPath;
+      log(job, 'Screenshot saved.');
+    } catch {}
+
     await uiPage.close().catch(() => {});
 
     if (!uiSuccess) {
-      log(job, 'Ballot page unavailable; generating vote report from API data…');
+      log(job, 'Ballot UI submission incomplete — building vote report from API data…');
     }
 
-    // Use a fresh page for PDF so redirect failures don't contaminate it
-    const pdfPage = await context.newPage();
+    // 3. Generate PDF on a fresh page
     log(job, 'Generating PDF report…');
+    const pdfPage = await context.newPage();
     const pdfPath = await generatePDF(pdfPage, job, votePlan, uiSuccess);
     await pdfPage.close().catch(() => {});
+
     job.pdfPath = pdfPath;
     job.status = 'done';
     log(job, 'Done! PDF is ready for download.');
@@ -115,55 +172,89 @@ async function performVoting(jobId) {
 
 async function voteViaUI(page, job, votePlan) {
   try {
-    // Navigate with a short redirect-loop timeout
     let redirectCount = 0;
-    page.on('response', res => {
-      if (res.status() === 302 && res.url().includes('Best-of-Renton-2026')) redirectCount++;
+    page.on('response', r => {
+      if (r.status() >= 300 && r.status() < 400 && r.url().includes('Best-of-Renton')) redirectCount++;
     });
 
-    await page.goto(BALLOT_URL, { waitUntil: 'domcontentloaded', timeout: 20000 });
-    await page.waitForTimeout(3000);
+    await page.goto(BALLOT_URL, { waitUntil: 'networkidle', timeout: 30000 });
 
-    if (redirectCount >= 5) {
-      log(job, 'Redirect loop detected – UI voting not available in this environment.');
+    if (redirectCount >= 8) {
+      log(job, 'Redirect loop detected — UI voting unavailable in this environment.');
       return false;
     }
 
     const title = await page.title();
     log(job, `Ballot page loaded: "${title}"`);
 
-    // Navigate through all category groups using navigation tabs/links
-    const groupLinks = await page.$$('[data-group-id], .ballot-group-tab, [class*="group"] a, [class*="tab"] a');
-    log(job, `Found ${groupLinks.length} group navigation elements`);
+    // Explore page structure so we can vote intelligently
+    const pageInfo = await page.evaluate(() => {
+      // Collect all interactive elements and their text
+      const inputs = Array.from(document.querySelectorAll('input[type="radio"], input[type="checkbox"]'))
+        .map(el => ({
+          type: el.type, name: el.name, value: el.value,
+          id: el.id, checked: el.checked,
+          labelText: (document.querySelector(`label[for="${el.id}"]`) || el.closest('label'))?.textContent?.trim(),
+          dataAttrs: Object.fromEntries(Array.from(el.attributes).filter(a => a.name.startsWith('data-')).map(a => [a.name, a.value])),
+        }));
 
-    // Vote in currently visible matchups, then navigate to others
-    await voteInVisibleMatchups(page, job, votePlan);
+      const buttons = Array.from(document.querySelectorAll('button, [role="button"]'))
+        .slice(0, 40)
+        .map(el => ({ text: el.textContent?.trim(), classes: el.className, disabled: el.disabled }));
 
-    // Look for navigation to other groups
-    const allGroupIds = [...new Set(votePlan.map(v => v.matchup.matchup_group_id))];
-    for (const groupId of allGroupIds) {
-      try {
-        const groupLink = await page.$(`[data-group-id="${groupId}"], a[href*="group=${groupId}"]`);
-        if (groupLink) {
-          await groupLink.click();
-          await page.waitForTimeout(1500);
-          await voteInVisibleMatchups(page, job, votePlan);
-        }
-      } catch {}
+      // Look for group/category containers
+      const bodyClasses = document.body.className;
+      const appDiv = document.querySelector('#ember-application, #app, .ember-application, [class*="contest"], [class*="ballot"]');
+
+      return {
+        inputCount: inputs.length,
+        sampleInputs: inputs.slice(0, 20),
+        buttonCount: buttons.length,
+        sampleButtons: buttons.slice(0, 15),
+        bodyClasses,
+        appClass: appDiv?.className?.slice(0, 100),
+        headings: Array.from(document.querySelectorAll('h1,h2,h3,h4')).slice(0, 20).map(h => h.textContent?.trim()),
+        allClasses: [...new Set(Array.from(document.querySelectorAll('*')).map(el => el.className).filter(c => typeof c === 'string' && c.length > 0))].slice(0, 60),
+      };
+    });
+
+    log(job, `Page: ${pageInfo.inputCount} radio/checkbox inputs, ${pageInfo.buttonCount} buttons`);
+    log(job, `Headings: ${pageInfo.headings.slice(0, 5).join(' | ')}`);
+    log(job, `Sample classes: ${pageInfo.allClasses.slice(0, 10).join(', ')}`);
+
+    if (pageInfo.sampleInputs.length > 0) {
+      log(job, `Sample input: ${JSON.stringify(pageInfo.sampleInputs[0])}`);
     }
 
-    // Fill in voter info form
+    // Save ballot HTML for debugging
+    job.ballotHtml = await page.content();
+
+    // Strategy 1: vote by radio input label text
+    let votedCount = 0;
+    if (pageInfo.inputCount > 0) {
+      votedCount = await voteByRadioLabels(page, job, votePlan);
+    }
+
+    // Strategy 2: vote by clicking entry cards/buttons with text matching
+    if (votedCount === 0) {
+      votedCount = await voteByTextContent(page, job, votePlan);
+    }
+
+    log(job, `Voted in ${votedCount} categories via UI`);
+
+    // Scroll to and fill voter info form
     log(job, 'Filling in voter information…');
     await fillVoterInfo(page, job);
 
-    // Submit ballot
+    // Submit
     log(job, 'Submitting ballot…');
     const submitted = await submitBallot(page, job);
     if (submitted) {
-      await page.waitForTimeout(3000);
+      await page.waitForTimeout(4000);
       log(job, 'Ballot submitted successfully!');
       return true;
     }
+    log(job, 'Submit button not triggered — will fall back to report.');
     return false;
   } catch (err) {
     log(job, `UI voting error: ${err.message}`);
@@ -171,86 +262,72 @@ async function voteViaUI(page, job, votePlan) {
   }
 }
 
-async function voteInVisibleMatchups(page, job, votePlan) {
-  // SecondStreet ballot apps use various selector patterns
-  const categorySelectors = [
-    '[data-matchup-id]',
-    '[class*="matchup"]',
-    '[class*="ballot-category"]',
-    '[class*="category-card"]',
-    '.voting-category',
-  ];
-
-  for (const sel of categorySelectors) {
-    const categories = await page.$$(sel);
-    if (categories.length > 0) {
-      log(job, `Found ${categories.length} categories with selector "${sel}"`);
-      for (const cat of categories) {
-        await selectEntryInCategory(page, cat, job, votePlan);
-      }
-      break;
-    }
+async function voteByRadioLabels(page, job, votePlan) {
+  // Build lookup: entry name → vote plan entry
+  const entryByName = {};
+  for (const v of votePlan) {
+    entryByName[v.selectedEntry.name.toLowerCase().trim()] = v;
   }
+
+  const clicked = await page.evaluate((nameMap) => {
+    let count = 0;
+    const inputs = Array.from(document.querySelectorAll('input[type="radio"]'));
+    for (const input of inputs) {
+      const label = document.querySelector(`label[for="${input.id}"]`) || input.closest('label');
+      const text = label?.textContent?.trim().toLowerCase() || input.value?.toLowerCase();
+      if (text && nameMap[text] !== undefined) {
+        input.click();
+        count++;
+      }
+    }
+    return count;
+  }, entryByName);
+
+  return clicked;
 }
 
-async function selectEntryInCategory(page, categoryEl, job, votePlan) {
-  try {
-    // Try to get matchup ID from element attributes
-    const matchupId = await categoryEl.evaluate(el => {
-      return el.getAttribute('data-matchup-id') ||
-             el.getAttribute('data-id') ||
-             el.id?.replace(/\D/g, '') || null;
-    });
+async function voteByTextContent(page, job, votePlan) {
+  // Try clicking on entry containers that contain the target text
+  const entryNames = votePlan.map(v => v.selectedEntry.name);
+  let count = 0;
 
-    // Find the vote plan entry for this matchup
-    const plan = matchupId
-      ? votePlan.find(v => String(v.matchup.id) === String(matchupId))
-      : null;
-
-    const entryName = plan
-      ? plan.selectedEntry.name
-      : null;
-
-    if (!entryName) return;
-
-    // Try to click on the correct entry
-    const entrySelectors = [
-      `[data-entry-name="${entryName}"]`,
-      `[title="${entryName}"]`,
-      `input[value="${entryName}"]`,
-    ];
-
-    // Also try text matching
-    const allEntryBtns = await categoryEl.$$('button, label, [role="radio"], input[type="radio"]');
-    for (const btn of allEntryBtns) {
-      const text = await btn.evaluate(el => el.textContent || el.value || el.getAttribute('aria-label') || '');
-      if (text.trim().toLowerCase() === entryName.toLowerCase()) {
-        await btn.click();
-        log(job, `  ✓ Voted for "${entryName}" in ${plan?.matchup.name || 'category'}`);
-        return;
+  for (const name of entryNames) {
+    try {
+      // Try various selector strategies
+      const selectors = [
+        `[class*="entry"]:has-text("${name}")`,
+        `[class*="option"]:has-text("${name}")`,
+        `[class*="candidate"]:has-text("${name}")`,
+        `li:has-text("${name}")`,
+        `label:has-text("${name}")`,
+      ];
+      for (const sel of selectors) {
+        try {
+          const el = page.locator(sel).first();
+          if (await el.count() > 0) {
+            await el.click({ timeout: 2000 });
+            count++;
+            break;
+          }
+        } catch {}
       }
-    }
-
-    for (const sel of entrySelectors) {
-      try {
-        const el = await categoryEl.$(sel);
-        if (el) {
-          await el.click();
-          log(job, `  ✓ Voted for "${entryName}" via selector`);
-          return;
-        }
-      } catch {}
-    }
-  } catch {}
+    } catch {}
+  }
+  return count;
 }
 
 async function fillVoterInfo(page, job) {
   const { email, firstName, lastName, zip } = job;
+
+  // Scroll down to find the form
+  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  await page.waitForTimeout(500);
+
   const fieldMap = [
-    { selectors: ['input[type="email"]', 'input[name="email"]', 'input[id*="email"]'], value: email },
-    { selectors: ['input[name="first_name"]', 'input[id*="first"]', 'input[placeholder*="First"]'], value: firstName },
-    { selectors: ['input[name="last_name"]', 'input[id*="last"]', 'input[placeholder*="Last"]'], value: lastName },
-    { selectors: ['input[name="zip"]', 'input[id*="zip"]', 'input[placeholder*="zip"]', 'input[placeholder*="ZIP"]'], value: zip },
+    { selectors: ['input[type="email"]', 'input[name*="email"]', 'input[id*="email"]', 'input[placeholder*="mail"]'], value: email },
+    { selectors: ['input[name*="first"]', 'input[id*="first"]', 'input[placeholder*="First"]', 'input[placeholder*="first"]'], value: firstName },
+    { selectors: ['input[name*="last"]', 'input[id*="last"]', 'input[placeholder*="Last"]', 'input[placeholder*="last"]'], value: lastName },
+    { selectors: ['input[name*="zip"]', 'input[id*="zip"]', 'input[placeholder*="ZIP"]', 'input[placeholder*="zip"]', 'input[placeholder*="postal"]'], value: zip },
   ];
 
   for (const { selectors, value } of fieldMap) {
@@ -258,10 +335,7 @@ async function fillVoterInfo(page, job) {
     for (const sel of selectors) {
       try {
         const el = await page.$(sel);
-        if (el) {
-          await el.fill(value);
-          break;
-        }
+        if (el) { await el.fill(value); break; }
       } catch {}
     }
   }
@@ -271,27 +345,29 @@ async function submitBallot(page, job) {
   const submitSelectors = [
     'button[type="submit"]',
     'input[type="submit"]',
-    'button:has-text("Submit")',
-    'button:has-text("Vote")',
-    'button:has-text("Cast")',
     '[class*="submit"]',
+    '[class*="vote-btn"]',
+    '[class*="cast"]',
   ];
 
   for (const sel of submitSelectors) {
     try {
       const btn = await page.$(sel);
       if (btn) {
+        await btn.scrollIntoViewIfNeeded();
         await btn.click();
         return true;
       }
     } catch {}
   }
 
-  // Try text-based search
-  try {
-    await page.getByRole('button', { name: /submit|vote|cast/i }).click();
-    return true;
-  } catch {}
+  // Text-based fallback
+  for (const text of ['Submit', 'Vote', 'Cast My Vote', 'Submit Votes']) {
+    try {
+      await page.getByRole('button', { name: text, exact: false }).click({ timeout: 2000 });
+      return true;
+    } catch {}
+  }
 
   return false;
 }
@@ -301,20 +377,26 @@ async function submitBallot(page, job) {
 async function generatePDF(page, job, votePlan, uiSuccess) {
   const html = buildResultsHTML(job, votePlan, uiSuccess);
 
-  await page.setContent(html, { waitUntil: 'networkidle' });
-  await page.waitForTimeout(500);
+  // Use a data: URL for reliable rendering (avoids setContent timing issues)
+  const encoded = Buffer.from(html).toString('base64');
+  await page.goto(`data:text/html;base64,${encoded}`, { waitUntil: 'load', timeout: 15000 });
 
-  const pdfDir = path.join(__dirname, 'pdfs');
-  if (!fs.existsSync(pdfDir)) fs.mkdirSync(pdfDir);
+  // Ensure the page is fully rendered before generating PDF
+  await page.waitForFunction(() => document.readyState === 'complete');
+  await page.waitForTimeout(800);
 
-  const pdfPath = path.join(pdfDir, `votes-${randomUUID()}.pdf`);
+  const dir = ensureDir(path.join(__dirname, 'pdfs'));
+  const pdfPath = path.join(dir, `votes-${randomUUID()}.pdf`);
+
   await page.pdf({
     path: pdfPath,
     format: 'Letter',
     printBackground: true,
-    margin: { top: '0.75in', right: '0.75in', bottom: '0.75in', left: '0.75in' },
+    margin: { top: '0.6in', right: '0.6in', bottom: '0.6in', left: '0.6in' },
   });
 
+  const stat = fs.statSync(pdfPath);
+  log(job, `PDF written: ${Math.round(stat.size / 1024)}KB`);
   return pdfPath;
 }
 
@@ -324,113 +406,80 @@ function buildResultsHTML(job, votePlan, uiSuccess) {
   const now = new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles' });
   const libertyCount = votePlan.filter(v => v.isLiberty).length;
 
-  const groupMap = {};
+  // Group by matchup_group
+  const groupMap = new Map();
   for (const v of votePlan) {
     const gid = v.matchup.matchup_group_id;
-    if (!groupMap[gid]) groupMap[gid] = { name: v.groupName, rows: [] };
-    groupMap[gid].rows.push(v);
+    if (!groupMap.has(gid)) groupMap.set(gid, { name: v.groupName, rows: [] });
+    groupMap.get(gid).rows.push(v);
   }
 
-  const groupSections = Object.values(groupMap).map(g => `
-    <div class="group-section">
-      <h3>${g.name}</h3>
-      <table>
-        <thead><tr><th>Category</th><th>Voted For</th><th>Reason</th></tr></thead>
-        <tbody>
-          ${g.rows.map(v => `
-            <tr class="${v.isLiberty ? 'liberty-row' : ''}">
-              <td>${v.matchup.name}</td>
-              <td><strong>${v.selectedEntry.name}</strong></td>
-              <td>${v.isLiberty ? '⭐ Liberty Cafe' : 'Random selection'}</td>
-            </tr>
-          `).join('')}
-        </tbody>
-      </table>
-    </div>
-  `).join('');
+  const groupSections = Array.from(groupMap.values()).map(g => {
+    const rows = g.rows.map(v => {
+      const cat = v.matchup.name || '';
+      const entry = v.selectedEntry.name || '';
+      const note = v.isLiberty ? 'Liberty Cafe nominee' : 'Random selection';
+      const rowClass = v.isLiberty ? ' class="lc"' : '';
+      return `<tr${rowClass}><td>${cat}</td><td>${entry}</td><td>${note}</td></tr>`;
+    }).join('');
+    return `<div class="gs"><h3>${g.name}</h3><table><thead><tr><th>Category</th><th>Voted For</th><th>Notes</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  }).join('');
 
-  const statusBanner = uiSuccess
-    ? `<div class="status success">✅ Ballot submitted successfully via ballot website</div>`
-    : `<div class="status info">📋 Vote plan prepared — ballot submitted via API (${libertyCount} Liberty Cafe votes + ${votePlan.length - libertyCount} random)</div>`;
+  const statusMsg = uiSuccess
+    ? 'Ballot submitted successfully via the ballot website.'
+    : `Vote report prepared: ${libertyCount} Liberty Cafe votes, ${votePlan.length - libertyCount} random picks across ${votePlan.length} categories.`;
 
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Best of Renton 2026 — Voting Report</title>
+<title>Best of Renton 2026 Voting Report</title>
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: 'Helvetica Neue', Arial, sans-serif; font-size: 11pt; color: #1a1a1a; background: #fff; }
-  .header { background: linear-gradient(135deg, #8B0000 0%, #c0392b 100%); color: white; padding: 32px 40px; }
-  .header h1 { font-size: 22pt; font-weight: 700; letter-spacing: -0.5px; }
-  .header .subtitle { margin-top: 6px; opacity: 0.85; font-size: 11pt; }
-  .content { padding: 28px 40px; }
-  .status { padding: 14px 18px; border-radius: 6px; margin-bottom: 24px; font-size: 10.5pt; font-weight: 500; }
-  .status.success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
-  .status.info { background: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
-  .voter-card { background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; padding: 18px 22px; margin-bottom: 28px; }
-  .voter-card h2 { font-size: 12pt; color: #495057; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
-  .voter-info { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-  .voter-info .field { font-size: 10.5pt; }
-  .voter-info .label { color: #6c757d; font-weight: 500; }
-  .voter-info .value { color: #212529; font-weight: 600; }
-  .summary-stats { display: flex; gap: 20px; margin-bottom: 28px; }
-  .stat { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; padding: 16px 20px; flex: 1; text-align: center; }
-  .stat .num { font-size: 28pt; font-weight: 700; color: #8B0000; }
-  .stat .label { font-size: 9pt; color: #6c757d; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
-  .group-section { margin-bottom: 28px; }
-  .group-section h3 { font-size: 13pt; font-weight: 700; color: #8B0000; border-bottom: 2px solid #8B0000; padding-bottom: 6px; margin-bottom: 12px; }
-  table { width: 100%; border-collapse: collapse; font-size: 9.5pt; }
-  th { background: #343a40; color: white; padding: 8px 12px; text-align: left; font-weight: 600; text-transform: uppercase; font-size: 8.5pt; letter-spacing: 0.5px; }
-  td { padding: 7px 12px; border-bottom: 1px solid #e9ecef; vertical-align: top; }
-  tr:last-child td { border-bottom: none; }
-  .liberty-row td { background: #fff8f0; }
-  .liberty-row td:first-child { border-left: 3px solid #e67e22; }
-  .footer { margin-top: 36px; padding-top: 16px; border-top: 1px solid #dee2e6; color: #6c757d; font-size: 9pt; text-align: center; }
-  .ballot-url { font-family: monospace; font-size: 8.5pt; background: #f8f9fa; padding: 2px 6px; border-radius: 3px; }
+body { font-family: Arial, Helvetica, sans-serif; font-size: 10pt; color: #111; background: white; margin: 0; padding: 0; }
+.hdr { background: #8B0000; color: white; padding: 24px 32px; }
+.hdr h1 { font-size: 20pt; margin: 0 0 4px; }
+.hdr p { margin: 0; font-size: 10pt; opacity: 0.88; }
+.body { padding: 24px 32px; }
+.banner { padding: 12px 16px; border-radius: 4px; margin-bottom: 20px; font-size: 10pt; font-weight: bold;
+  background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+.info { background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; padding: 14px 18px; margin-bottom: 20px; }
+.info p { margin: 3px 0; }
+.stats { display: flex; gap: 16px; margin-bottom: 20px; }
+.stat { border: 1px solid #dee2e6; border-radius: 6px; padding: 12px 16px; flex: 1; text-align: center; }
+.stat .n { font-size: 22pt; font-weight: bold; color: #8B0000; }
+.stat .l { font-size: 8pt; color: #666; text-transform: uppercase; letter-spacing: 0.5px; }
+.gs { margin-bottom: 22px; }
+.gs h3 { font-size: 12pt; color: #8B0000; border-bottom: 2px solid #8B0000; padding-bottom: 4px; margin: 0 0 8px; }
+table { width: 100%; border-collapse: collapse; font-size: 9pt; }
+th { background: #333; color: white; padding: 6px 10px; text-align: left; font-size: 8pt; text-transform: uppercase; letter-spacing: 0.4px; }
+td { padding: 6px 10px; border-bottom: 1px solid #eee; }
+tr.lc { background: #fff8e6; }
+tr.lc td:first-child { border-left: 3px solid #e67e22; }
+.footer { margin-top: 24px; padding-top: 12px; border-top: 1px solid #dee2e6; font-size: 8pt; color: #666; text-align: center; }
 </style>
 </head>
 <body>
-  <div class="header">
-    <h1>Best of Renton 2026</h1>
-    <div class="subtitle">Voting Report — Renton Reporter Ballot</div>
+<div class="hdr">
+  <h1>Best of Renton 2026 &mdash; Voting Report</h1>
+  <p>Renton Reporter Annual Ballot</p>
+</div>
+<div class="body">
+  <div class="banner">${statusMsg}</div>
+  <div class="info">
+    <p><strong>Voter:</strong> ${fullName} (${email})${zip ? ' &mdash; ZIP: ' + zip : ''}</p>
+    <p><strong>Submitted:</strong> ${now} PT</p>
   </div>
-
-  <div class="content">
-    ${statusBanner}
-
-    <div class="voter-card">
-      <h2>Voter Information</h2>
-      <div class="voter-info">
-        <div class="field"><span class="label">Name: </span><span class="value">${fullName}</span></div>
-        <div class="field"><span class="label">Email: </span><span class="value">${email}</span></div>
-        ${zip ? `<div class="field"><span class="label">ZIP: </span><span class="value">${zip}</span></div>` : ''}
-        <div class="field"><span class="label">Submitted: </span><span class="value">${now} PT</span></div>
-      </div>
-    </div>
-
-    <div class="summary-stats">
-      <div class="stat">
-        <div class="num">${votePlan.length}</div>
-        <div class="label">Total Categories</div>
-      </div>
-      <div class="stat">
-        <div class="num">${libertyCount}</div>
-        <div class="label">Liberty Cafe Votes</div>
-      </div>
-      <div class="stat">
-        <div class="num">${votePlan.length - libertyCount}</div>
-        <div class="label">Random Selections</div>
-      </div>
-    </div>
-
-    ${groupSections}
-
-    <div class="footer">
-      <p>Ballot: <span class="ballot-url">${BALLOT_URL}</span></p>
-      <p style="margin-top:6px">Generated ${now} PT | Best of Renton 2026 Voting Report</p>
-    </div>
+  <div class="stats">
+    <div class="stat"><div class="n">${votePlan.length}</div><div class="l">Total Categories</div></div>
+    <div class="stat"><div class="n">${libertyCount}</div><div class="l">Liberty Cafe Votes</div></div>
+    <div class="stat"><div class="n">${votePlan.length - libertyCount}</div><div class="l">Random Picks</div></div>
   </div>
+  ${groupSections}
+  <div class="footer">
+    <p>Ballot URL: ${BALLOT_URL}</p>
+    <p>Report generated ${now} PT</p>
+  </div>
+</div>
 </body>
 </html>`;
 }
@@ -438,7 +487,6 @@ function buildResultsHTML(job, votePlan, uiSuccess) {
 // ── API data fetching ────────────────────────────────────────────────────────
 
 async function fetchBallotData(page) {
-  // Navigate to the promotions feed to establish browser context
   await page.goto(`${API_BASE}/`, { waitUntil: 'networkidle', timeout: 20000 });
 
   const apiHeaders = {
@@ -448,37 +496,40 @@ async function fetchBallotData(page) {
     'x-organization-promotion-id': ORG_PROMO_ID,
   };
 
-  const { matchups, groups, entries } = await page.evaluate(async ({ base, headers, promoId }) => {
-    async function apiFetch(url) {
+  const result = await page.evaluate(async ({ base, headers, promoId }) => {
+    const apiFetch = async (url) => {
       const res = await fetch(url, { headers });
       if (!res.ok) throw new Error(`${res.status} ${url}`);
       return res.json();
-    }
+    };
 
-    // Fetch all matchups (paginated)
+    // Matchups (paginate properly)
     let allMatchups = [];
+    const seenMatchupIds = new Set();
     for (let p = 1; p <= 10; p++) {
       const data = await apiFetch(`${base}/api/matchups?promotionId=${promoId}&page_size=100&page_index=${p}`);
-      const items = data.matchups || [];
+      const items = (data.matchups || []).filter(m => !seenMatchupIds.has(m.id));
+      items.forEach(m => seenMatchupIds.add(m.id));
       allMatchups = allMatchups.concat(items);
-      if (items.length < 100) break;
+      if (items.length === 0) break;
     }
 
-    // Fetch matchup groups
+    // Groups
     const groupsData = await apiFetch(`${base}/api/matchup_groups?promotionId=${promoId}`);
 
-    // Fetch all voting entries in one call (API returns all regardless of page_size)
+    // Entries (API returns all in one shot; deduplicate just in case)
     const entriesData = await apiFetch(`${base}/api/voting_entries?promotionId=${promoId}&page_size=5000`);
-    const allEntries = entriesData.voting_entries || [];
+    const seenEntryIds = new Set();
+    const allEntries = (entriesData.voting_entries || []).filter(e => {
+      if (seenEntryIds.has(e.id)) return false;
+      seenEntryIds.add(e.id);
+      return true;
+    });
 
-    return {
-      matchups: allMatchups,
-      groups: groupsData.matchup_groups || [],
-      entries: allEntries,
-    };
+    return { matchups: allMatchups, groups: groupsData.matchup_groups || [], entries: allEntries };
   }, { base: API_BASE, headers: apiHeaders, promoId: PROMO_ID });
 
-  return { matchups, groups, entries };
+  return result;
 }
 
 // ── Vote plan builder ────────────────────────────────────────────────────────
@@ -497,12 +548,8 @@ function buildVotePlan(matchups, entries, groups) {
     .filter(m => (entriesByMatchup[m.id] || []).length > 0)
     .map(matchup => {
       const pool = entriesByMatchup[matchup.id] || [];
-      const libertyCafe = pool.find(e =>
-        e.name && e.name.toLowerCase().includes(TARGET_NAME)
-      );
-
+      const libertyCafe = pool.find(e => e.name && e.name.toLowerCase().includes(TARGET_NAME));
       const selectedEntry = libertyCafe || pool[Math.floor(Math.random() * pool.length)];
-
       return {
         matchup,
         groupName: groupById[matchup.matchup_group_id] || `Group ${matchup.matchup_group_id}`,
@@ -520,23 +567,22 @@ function log(job, msg) {
   console.log(`[${job.email}] ${msg}`);
 }
 
+function ensureDir(dir) {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
 function findChromium() {
-  // Check explicit env var first
   if (process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH &&
       fs.existsSync(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH)) {
     return process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
   }
-
-  // Fixed paths (local dev, CI)
   const fixed = [
     '/opt/pw-browsers/chromium-1194/chrome-linux/chrome',
     '/opt/pw-browsers/chromium/chrome-linux/chrome',
   ];
-  for (const c of fixed) {
-    if (fs.existsSync(c)) return c;
-  }
+  for (const c of fixed) { if (fs.existsSync(c)) return c; }
 
-  // Playwright Docker image: /ms-playwright/chromium-NNNN/chrome-linux/chrome
   const browsersRoot = process.env.PLAYWRIGHT_BROWSERS_PATH || '/ms-playwright';
   if (fs.existsSync(browsersRoot)) {
     for (const dir of fs.readdirSync(browsersRoot).sort().reverse()) {
@@ -544,13 +590,10 @@ function findChromium() {
       if (fs.existsSync(exe)) return exe;
     }
   }
-
-  return undefined; // let Playwright auto-detect
+  return undefined;
 }
 
 // ── Start server ─────────────────────────────────────────────────────────────
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Liberty Cafe Voter running at http://localhost:${PORT}`);
-});
+app.listen(PORT, () => console.log(`Liberty Cafe Voter on http://localhost:${PORT}`));
