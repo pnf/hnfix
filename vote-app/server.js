@@ -114,11 +114,12 @@ app.get('/debug/ballot', async (req, res) => {
     // Collect all frames
     const frameInfo = page.frames().map(f => ({ url: f.url(), name: f.name() }));
 
-    // Find ballot frame
+    // Find ballot frame — skip main frame, about:blank, Twitter
     const ballotFrame = page.frames().find(f =>
-      f.url().includes('secondstreet') || f.url().includes('ss-') ||
-      f.url().includes('ballot') || f.url().includes('gallery') ||
-      (f !== page.mainFrame() && f.url() !== 'about:blank')
+      f !== page.mainFrame() &&
+      f.url() !== 'about:blank' &&
+      !f.url().includes('twitter.com') &&
+      !f.url().includes('platform.')
     ) || page.mainFrame();
 
     const frameHtml = await ballotFrame.content().catch(() => '');
@@ -230,16 +231,16 @@ async function voteViaUI(page, job, votePlan) {
     const title = await page.title();
     log(job, `Ballot page loaded: "${title}"`);
 
-    // Detect all frames — ballot may be inside an iframe
+    // Detect all frames — ballot is embedded in an iframe on embed-XXXXXX.secondstreetapp.com
     const frames = page.frames();
     log(job, `Page frames: ${frames.map(f => f.url().substring(0, 80)).join(' | ')}`);
 
-    // Pick the frame most likely to contain the ballot
+    // Skip main frame, about:blank, and Twitter widget — ballot is first remaining frame
     const ballotFrame = frames.find(f =>
       f !== page.mainFrame() &&
       f.url() !== 'about:blank' &&
-      (f.url().includes('secondstreet') || f.url().includes('gallery') ||
-       f.url().includes('ballot') || f.url().includes('Best-of-Renton'))
+      !f.url().includes('twitter.com') &&
+      !f.url().includes('platform.')
     ) || page.mainFrame();
 
     if (ballotFrame !== page.mainFrame()) {
