@@ -83,21 +83,12 @@ app.get('/screenshot/:jobId', (req, res) => {
   res.sendFile(job.screenshotPath);
 });
 
-// Debug: explore the ballot page and return its structure
+// Debug: explore the ballot page and return its structure (pre- and post-login)
 app.get('/debug/ballot', async (req, res) => {
   const browser = await chromium.launch({ headless: true, executablePath: findChromium(), args: LAUNCH_ARGS });
   try {
     const ctx = await browser.newContext({ ignoreHTTPSErrors: true });
     const page = await ctx.newPage();
-
-    let redirectCount = 0;
-    const redirectLog = [];
-    page.on('response', r => {
-      if (r.status() >= 300 && r.status() < 400) {
-        redirectCount++;
-        redirectLog.push({ status: r.status(), url: r.url() });
-      }
-    });
 
     let navError = null;
     try {
@@ -105,37 +96,64 @@ app.get('/debug/ballot', async (req, res) => {
     } catch (e) {
       navError = e.message;
     }
-    // Wait for Ember to render inputs
-    await page.waitForSelector('input[type="radio"]', { timeout: 20000 }).catch(() => {});
+    await page.waitForTimeout(5000);
 
-    const title = await page.title().catch(() => '');
-    const url = page.url();
-    const html = await page.content().catch(() => '');
-    const screenshot = await page.screenshot({ fullPage: false }).catch(() => null);
+    const snap = async (label) => ({
+      label,
+      inputs: await page.evaluate(() =>
+        Array.from(document.querySelectorAll('input')).slice(0, 20).map(el => ({
+          type: el.type, name: el.name, id: el.id, placeholder: el.placeholder,
+          label: (document.querySelector(`label[for="${el.id}"]`) || el.closest('label'))?.textContent?.trim(),
+        }))
+      ).catch(() => []),
+      buttons: await page.evaluate(() =>
+        Array.from(document.querySelectorAll('button, [role="button"]')).slice(0, 30).map(el => ({
+          text: el.textContent?.trim().slice(0, 60), cls: el.className,
+        }))
+      ).catch(() => []),
+      sampleClasses: await page.evaluate(() =>
+        [...new Set(Array.from(document.querySelectorAll('*')).map(el => el.className).filter(c => typeof c === 'string' && c.trim()))].slice(0, 50)
+      ).catch(() => []),
+      entryEls: await page.evaluate(() =>
+        Array.from(document.querySelectorAll('[class*="entry"],[class*="contestant"],[class*="nominee"],[class*="gallery-item"],[class*="card"]')).slice(0, 10).map(el => ({
+          cls: el.className,
+          text: el.textContent?.trim().slice(0, 120),
+        }))
+      ).catch(() => []),
+      htmlPreview: (await page.content().catch(() => '')).substring(0, 6000),
+    });
 
-    const inputs = await page.evaluate(() =>
-      Array.from(document.querySelectorAll('input')).slice(0, 30).map(el => ({
-        type: el.type, name: el.name, id: el.id, value: el.value,
-        placeholder: el.placeholder,
-        label: (document.querySelector(`label[for="${el.id}"]`) || el.closest('label'))?.textContent?.trim(),
-        dataAttrs: Object.fromEntries(Array.from(el.attributes).filter(a => a.name.startsWith('data-')).map(a => [a.name, a.value])),
-      }))
-    ).catch(() => []);
+    const prelog = await snap('pre-login');
+    const screenshotPre = await page.screenshot({ fullPage: false }).catch(() => null);
 
-    const sampleClasses = await page.evaluate(() =>
-      [...new Set(Array.from(document.querySelectorAll('*')).map(el => el.className).filter(c => typeof c === 'string' && c.length > 0))].slice(0, 40)
-    ).catch(() => []);
+    // Click login-prompt-button
+    let loginClicked = false;
+    let loginClickError = null;
+    const loginBtn = page.locator('.login-prompt-button').first();
+    if (await loginBtn.count() > 0) {
+      try {
+        await loginBtn.click();
+        loginClicked = true;
+        await page.waitForTimeout(2000);
+      } catch (e) {
+        loginClickError = e.message;
+      }
+    }
+
+    // Fill dummy voter info in the modal
+    const dummyJob = { email: 'test@example.com', firstName: 'Test', lastName: 'User', zip: '98055' };
+    const fillLog = [];
+    await fillVoterInfoInModal(page, { ...dummyJob, log: [] }, fillLog);
+
+    const postlog = await snap('post-login-form-filled');
+    const screenshotPost = await page.screenshot({ fullPage: false }).catch(() => null);
 
     await browser.close();
     res.json({
-      navError, redirectCount, redirectLog,
-      title, url,
-      inputCount: inputs.length,
-      inputs,
-      sampleClasses,
-      htmlLength: html.length,
-      htmlPreview: html.substring(0, 8000),
-      screenshotBase64: screenshot ? screenshot.toString('base64') : null,
+      navError, loginClicked, loginClickError, fillLog,
+      prelog, postlog,
+      screenshotPreBase64: screenshotPre ? screenshotPre.toString('base64') : null,
+      screenshotPostBase64: screenshotPost ? screenshotPost.toString('base64') : null,
     });
   } catch (err) {
     await browser.close().catch(() => {});
@@ -207,66 +225,64 @@ async function performVoting(jobId) {
 
 async function voteViaUI(page, job, votePlan) {
   try {
-    // Navigate directly to the embed URL (bypasses outer CMS wrapper/iframe)
-    log(job, `Loading embed ballot directly: ${EMBED_URL}`);
+    log(job, `Loading embed ballot: ${EMBED_URL}`);
     await page.goto(EMBED_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
-    // Wait for Ember to render radio inputs — up to 30s
-    log(job, 'Waiting for ballot inputs to render…');
-    await page.waitForSelector('input[type="radio"]', { timeout: 30000 }).catch(() => {
-      log(job, 'No radio inputs appeared within 30s');
+    log(job, 'Waiting for Ember SPA to render…');
+    await page.waitForTimeout(5000);
+
+    // Step 1: click login-prompt-button to get voter info form
+    const loginBtn = page.locator('.login-prompt-button').first();
+    if (await loginBtn.count() > 0) {
+      log(job, 'Clicking login-prompt-button…');
+      await loginBtn.click();
+      await page.waitForTimeout(2000);
+
+      // Step 2: fill voter info in the modal
+      log(job, 'Filling voter info in login modal…');
+      const fillLog = [];
+      await fillVoterInfoInModal(page, job, fillLog);
+      for (const msg of fillLog) log(job, msg);
+
+      // Step 3: submit the voter info form
+      log(job, 'Submitting voter info form…');
+      const formSubmitted = await submitVoterInfoModal(page, job);
+      if (formSubmitted) {
+        log(job, 'Voter info submitted — waiting for voting UI…');
+        await page.waitForTimeout(3000);
+      } else {
+        log(job, 'WARNING: could not submit voter info form');
+      }
+    } else {
+      log(job, 'login-prompt-button not found — ballot may already be active or structure changed');
+    }
+
+    // Log post-login state for diagnostics
+    const postInfo = await page.evaluate(() => ({
+      inputs: document.querySelectorAll('input').length,
+      buttons: Array.from(document.querySelectorAll('button')).map(b => b.textContent?.trim().slice(0, 40)).filter(Boolean).slice(0, 10),
+      entryClasses: [...new Set(Array.from(document.querySelectorAll('[class*="entry"],[class*="gallery-item"],[class*="contestant"],[class*="card"]')).map(el => el.className))].slice(0, 8),
+      allClasses: [...new Set(Array.from(document.querySelectorAll('*')).map(el => el.className).filter(c => typeof c === 'string' && c.trim()))].slice(0, 40),
+    })).catch(() => ({}));
+    log(job, `Post-login: ${postInfo.inputs} inputs, buttons: [${(postInfo.buttons || []).join(', ')}]`);
+    log(job, `Entry-like classes: ${(postInfo.entryClasses || []).join(' | ')}`);
+
+    // Step 4: scroll to trigger lazy-loading
+    await page.evaluate(async () => {
+      const step = 800;
+      for (let y = 0; y < Math.min(document.body.scrollHeight, 60000); y += step) {
+        window.scrollTo(0, y);
+        await new Promise(r => setTimeout(r, 80));
+      }
+      window.scrollTo(0, 0);
     });
+    await page.waitForTimeout(1000);
 
-    const title = await page.title();
-    log(job, `Ballot page loaded: "${title}" — url: ${page.url()}`);
-
-    // Explore frame structure
-    const pageInfo = await page.evaluate(() => {
-      const inputs = Array.from(document.querySelectorAll('input[type="radio"], input[type="checkbox"]'))
-        .map(el => ({
-          type: el.type, name: el.name, value: el.value,
-          id: el.id, checked: el.checked,
-          labelText: (document.querySelector(`label[for="${el.id}"]`) || el.closest('label'))?.textContent?.trim(),
-          dataAttrs: Object.fromEntries(Array.from(el.attributes).filter(a => a.name.startsWith('data-')).map(a => [a.name, a.value])),
-        }));
-
-      const buttons = Array.from(document.querySelectorAll('button, [role="button"]'))
-        .slice(0, 40)
-        .map(el => ({ text: el.textContent?.trim(), classes: el.className, disabled: el.disabled }));
-
-      return {
-        inputCount: inputs.length,
-        sampleInputs: inputs.slice(0, 20),
-        buttonCount: buttons.length,
-        sampleButtons: buttons.slice(0, 15),
-        bodyClasses: document.body.className,
-        headings: Array.from(document.querySelectorAll('h1,h2,h3,h4')).slice(0, 20).map(h => h.textContent?.trim()),
-        allClasses: [...new Set(Array.from(document.querySelectorAll('*')).map(el => el.className).filter(c => typeof c === 'string' && c.length > 0))].slice(0, 60),
-      };
-    });
-
-    log(job, `Page: ${pageInfo.inputCount} radio/checkbox inputs, ${pageInfo.buttonCount} buttons`);
-    log(job, `Headings: ${pageInfo.headings.slice(0, 5).join(' | ')}`);
-    log(job, `Sample classes: ${pageInfo.allClasses.slice(0, 10).join(', ')}`);
-    if (pageInfo.sampleInputs.length > 0) {
-      log(job, `Sample input: ${JSON.stringify(pageInfo.sampleInputs[0])}`);
-    }
-
-    job.ballotHtml = await page.content().catch(() => '');
-
-    let votedCount = 0;
-    if (pageInfo.inputCount > 0) {
-      votedCount = await voteByRadioLabels(page, job, votePlan);
-    }
-    if (votedCount === 0) {
-      votedCount = await voteByTextContent(page, job, votePlan);
-    }
-
+    // Step 5: vote on gallery entries
+    const votedCount = await voteOnGalleryEntries(page, job, votePlan);
     log(job, `Voted in ${votedCount} categories via UI`);
 
-    log(job, 'Filling in voter information…');
-    await fillVoterInfo(page, job);
-
+    // Step 6: submit ballot
     log(job, 'Submitting ballot…');
     const submitted = await submitBallot(page, job);
     if (submitted) {
@@ -282,79 +298,151 @@ async function voteViaUI(page, job, votePlan) {
   }
 }
 
-async function voteByRadioLabels(frame, job, votePlan) {
-  const entryByName = {};
-  for (const v of votePlan) {
-    entryByName[v.selectedEntry.name.toLowerCase().trim()] = true;
-  }
-
-  const clicked = await frame.evaluate((nameMap) => {
-    let count = 0;
-    const inputs = Array.from(document.querySelectorAll('input[type="radio"]'));
-    for (const input of inputs) {
-      const label = document.querySelector(`label[for="${input.id}"]`) || input.closest('label');
-      const text = label?.textContent?.trim().toLowerCase() || input.value?.toLowerCase();
-      if (text && nameMap[text] !== undefined) {
-        input.click();
-        count++;
-      }
-    }
-    return count;
-  }, entryByName);
-
-  return clicked;
-}
-
-async function voteByTextContent(frame, job, votePlan) {
-  const entryNames = votePlan.map(v => v.selectedEntry.name);
-  let count = 0;
-
-  for (const name of entryNames) {
-    try {
-      const selectors = [
-        `[class*="entry"]:has-text("${name}")`,
-        `[class*="option"]:has-text("${name}")`,
-        `[class*="candidate"]:has-text("${name}")`,
-        `li:has-text("${name}")`,
-        `label:has-text("${name}")`,
-      ];
-      for (const sel of selectors) {
-        try {
-          const el = frame.locator(sel).first();
-          if (await el.count() > 0) {
-            await el.click({ timeout: 2000 });
-            count++;
-            break;
-          }
-        } catch {}
-      }
-    } catch {}
-  }
-  return count;
-}
-
-async function fillVoterInfo(frame, job) {
+async function fillVoterInfoInModal(page, job, fillLog = []) {
   const { email, firstName, lastName, zip } = job;
 
-  await frame.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-  await frame.waitForTimeout(500);
-
   const fieldMap = [
-    { selectors: ['input[type="email"]', 'input[name*="email"]', 'input[id*="email"]', 'input[placeholder*="mail"]'], value: email },
-    { selectors: ['input[name*="first"]', 'input[id*="first"]', 'input[placeholder*="First"]', 'input[placeholder*="first"]'], value: firstName },
-    { selectors: ['input[name*="last"]', 'input[id*="last"]', 'input[placeholder*="Last"]', 'input[placeholder*="last"]'], value: lastName },
-    { selectors: ['input[name*="zip"]', 'input[id*="zip"]', 'input[placeholder*="ZIP"]', 'input[placeholder*="zip"]', 'input[placeholder*="postal"]'], value: zip },
+    { selectors: ['input[type="email"]', 'input[name*="email" i]', 'input[id*="email" i]', 'input[placeholder*="email" i]', 'input[placeholder*="mail" i]'], value: email },
+    { selectors: ['input[name*="first" i]', 'input[id*="first" i]', 'input[placeholder*="first" i]'], value: firstName },
+    { selectors: ['input[name*="last" i]', 'input[id*="last" i]', 'input[placeholder*="last" i]'], value: lastName },
+    { selectors: ['input[name*="zip" i]', 'input[id*="zip" i]', 'input[placeholder*="zip" i]', 'input[placeholder*="postal" i]'], value: zip },
   ];
 
   for (const { selectors, value } of fieldMap) {
     if (!value) continue;
     for (const sel of selectors) {
       try {
-        const el = await frame.$(sel);
-        if (el) { await el.fill(value); break; }
+        const el = await page.$(sel);
+        if (el) {
+          await el.fill(value);
+          fillLog.push(`Filled "${sel}" = "${value}"`);
+          break;
+        }
       } catch {}
     }
   }
+
+  // Check any unchecked checkboxes (age verification, terms, etc.)
+  const checkboxes = await page.$$('input[type="checkbox"]:not(:checked)');
+  for (const cb of checkboxes) {
+    try { await cb.check(); fillLog.push('Checked a checkbox'); } catch {}
+  }
+}
+
+async function submitVoterInfoModal(page, job) {
+  const submitSelectors = [
+    'button[type="submit"]',
+    'input[type="submit"]',
+    '[class*="submit"]',
+    '[class*="register"]',
+    '[class*="continue"]',
+  ];
+  for (const sel of submitSelectors) {
+    try {
+      const btn = await page.$(sel);
+      if (btn) {
+        log(job, `Submitting voter form via: ${sel}`);
+        await btn.click();
+        return true;
+      }
+    } catch {}
+  }
+  for (const text of ['Submit', 'Continue', 'Register', 'Sign In', 'Enter', 'Login']) {
+    try {
+      const btn = page.getByRole('button', { name: text, exact: false });
+      if (await btn.count() > 0) {
+        log(job, `Submitting voter form via button text: "${text}"`);
+        await btn.click();
+        return true;
+      }
+    } catch {}
+  }
+  return false;
+}
+
+async function voteOnGalleryEntries(page, job, votePlan) {
+  // Build plain-object lookup: lowercase entry name → category name (for logging)
+  const entryLookup = {};
+  for (const v of votePlan) {
+    entryLookup[v.selectedEntry.name.toLowerCase().trim()] = v.matchup.name || '';
+  }
+
+  const result = await page.evaluate((lookup) => {
+    const clicked = [];
+    const missed = [];
+
+    // Strategy A: find entry containers and look for a vote button inside
+    const containers = Array.from(document.querySelectorAll(
+      '[class*="entry"],[class*="contestant"],[class*="nominee"],[class*="gallery-item"],[class*="card"],[class*="item"]'
+    ));
+
+    for (const [name, catName] of Object.entries(lookup)) {
+      let found = false;
+      for (const container of containers) {
+        const text = container.textContent?.trim().toLowerCase() || '';
+        if (!text.includes(name)) continue;
+
+        // Found a container matching this entry — look for a vote button inside
+        const voteBtn = container.querySelector(
+          'button, [role="button"], [class*="vote"], [class*="select"], [class*="choose"]'
+        );
+        if (voteBtn) {
+          try {
+            voteBtn.scrollIntoView({ behavior: 'instant', block: 'center' });
+            voteBtn.click();
+            clicked.push({ name, catName, btnText: voteBtn.textContent?.trim(), btnCls: voteBtn.className });
+            found = true;
+          } catch (e) {
+            missed.push({ name, reason: e.message });
+          }
+          break;
+        }
+      }
+
+      // Strategy B: text-node walk to find entry name, then bubble up to find a button
+      if (!found) {
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        let node;
+        while ((node = walker.nextNode())) {
+          if (node.textContent?.trim().toLowerCase() !== name) continue;
+          let el = node.parentElement;
+          for (let depth = 0; depth < 7; depth++) {
+            if (!el) break;
+            const btn = el.querySelector('button, [role="button"]');
+            if (btn) {
+              try {
+                btn.scrollIntoView({ behavior: 'instant', block: 'center' });
+                btn.click();
+                clicked.push({ name, catName, btnText: btn.textContent?.trim(), btnCls: btn.className, strategy: 'B' });
+                found = true;
+              } catch (e) {
+                missed.push({ name, reason: e.message });
+              }
+              break;
+            }
+            el = el.parentElement;
+          }
+          break;
+        }
+        if (!found) missed.push({ name, reason: 'no container or button found' });
+      }
+    }
+
+    return { clicked, missed, containerCount: containers.length };
+  }, entryLookup);
+
+  log(job, `Gallery containers found: ${result.containerCount}`);
+  log(job, `Votes clicked: ${result.clicked.length}, missed: ${result.missed.length}`);
+  if (result.clicked.length > 0) {
+    for (const c of result.clicked.slice(0, 5)) {
+      log(job, `  ✓ "${c.name}" in "${c.catName}" (btn: "${c.btnText}" cls: "${c.btnCls}")`);
+    }
+  }
+  if (result.missed.length > 0) {
+    log(job, `  First missed: ${JSON.stringify(result.missed[0])}`);
+  }
+
+  return result.clicked.length;
 }
 
 async function submitBallot(frame, job) {
