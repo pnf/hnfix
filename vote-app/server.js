@@ -231,43 +231,8 @@ async function voteViaUI(page, job, votePlan) {
     log(job, 'Waiting for Ember SPA to render…');
     await page.waitForTimeout(5000);
 
-    // Step 1: click login-prompt-button to get voter info form
-    const loginBtn = page.locator('.login-prompt-button').first();
-    if (await loginBtn.count() > 0) {
-      log(job, 'Clicking login-prompt-button…');
-      await loginBtn.click();
-      await page.waitForTimeout(2000);
-
-      // Step 2: fill voter info in the modal
-      log(job, 'Filling voter info in login modal…');
-      const fillLog = [];
-      await fillVoterInfoInModal(page, job, fillLog);
-      for (const msg of fillLog) log(job, msg);
-
-      // Step 3: submit the voter info form
-      log(job, 'Submitting voter info form…');
-      const formSubmitted = await submitVoterInfoModal(page, job);
-      if (formSubmitted) {
-        log(job, 'Voter info submitted — waiting for voting UI…');
-        await page.waitForTimeout(3000);
-      } else {
-        log(job, 'WARNING: could not submit voter info form');
-      }
-    } else {
-      log(job, 'login-prompt-button not found — ballot may already be active or structure changed');
-    }
-
-    // Log post-login state for diagnostics
-    const postInfo = await page.evaluate(() => ({
-      inputs: document.querySelectorAll('input').length,
-      buttons: Array.from(document.querySelectorAll('button')).map(b => b.textContent?.trim().slice(0, 40)).filter(Boolean).slice(0, 10),
-      entryClasses: [...new Set(Array.from(document.querySelectorAll('[class*="entry"],[class*="gallery-item"],[class*="contestant"],[class*="card"]')).map(el => el.className))].slice(0, 8),
-      allClasses: [...new Set(Array.from(document.querySelectorAll('*')).map(el => el.className).filter(c => typeof c === 'string' && c.trim()))].slice(0, 40),
-    })).catch(() => ({}));
-    log(job, `Post-login: ${postInfo.inputs} inputs, buttons: [${(postInfo.buttons || []).join(', ')}]`);
-    log(job, `Entry-like classes: ${(postInfo.entryClasses || []).join(' | ')}`);
-
-    // Step 4: scroll to trigger lazy-loading
+    // Step 1: scroll to trigger lazy-loading of all entries
+    log(job, 'Scrolling to load all ballot entries…');
     await page.evaluate(async () => {
       const step = 800;
       for (let y = 0; y < Math.min(document.body.scrollHeight, 60000); y += step) {
@@ -278,19 +243,44 @@ async function voteViaUI(page, job, votePlan) {
     });
     await page.waitForTimeout(1000);
 
-    // Step 5: vote on gallery entries
+    // Log pre-vote state
+    const preInfo = await page.evaluate(() => ({
+      entryCount: document.querySelectorAll('[class*="individual-entry"]').length,
+      voteButtons: document.querySelectorAll('.vote-button, [class*="voting-button"]').length,
+      loginBtn: document.querySelectorAll('.login-prompt-button').length,
+    })).catch(() => ({}));
+    log(job, `Pre-vote: ${preInfo.entryCount} entries, ${preInfo.voteButtons} vote-buttons, ${preInfo.loginBtn} login-btn`);
+
+    // Step 2: vote on gallery entries BEFORE authenticating
     const votedCount = await voteOnGalleryEntries(page, job, votePlan);
     log(job, `Voted in ${votedCount} categories via UI`);
 
-    // Step 6: submit ballot
-    log(job, 'Submitting ballot…');
-    const submitted = await submitBallot(page, job);
-    if (submitted) {
-      await page.waitForTimeout(4000);
-      log(job, 'Ballot submitted successfully!');
-      return true;
+    // Step 3: click "Already Entered?" (login-prompt-button) to authenticate
+    const loginBtn = page.locator('.login-prompt-button').first();
+    if (await loginBtn.count() > 0) {
+      log(job, 'Clicking login-prompt-button to authenticate…');
+      await loginBtn.click();
+      await page.waitForTimeout(2000);
+
+      // Step 4: fill voter info
+      log(job, 'Filling voter info…');
+      const fillLog = [];
+      await fillVoterInfoInModal(page, job, fillLog);
+      for (const msg of fillLog) log(job, msg);
+
+      // Step 5: submit voter info
+      log(job, 'Submitting voter info…');
+      const formSubmitted = await submitVoterInfoModal(page, job);
+      if (formSubmitted) {
+        log(job, 'Voter info submitted successfully!');
+        await page.waitForTimeout(4000);
+        return true;
+      }
+      log(job, 'WARNING: could not submit voter info form');
+    } else {
+      log(job, 'login-prompt-button not found');
     }
-    log(job, 'Submit button not triggered — will fall back to report.');
+
     return false;
   } catch (err) {
     log(job, `UI voting error: ${err.message}`);
