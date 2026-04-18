@@ -377,7 +377,16 @@ async function voteViaUI(page, job, votePlan) {
     );
     log(job, `Entries in DOM: ${entryCount}`);
 
-    // Click vote buttons using Playwright locators (triggers Ember properly)
+    // Build a name→index map once (avoids O(n²) DOM evaluations)
+    log(job, 'Scanning ballot entries…');
+    const allEntries = page.locator('.individual-entry-view');
+    const total = await allEntries.count();
+    const entryNames = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('.individual-entry-view')).map(el =>
+        (el.textContent || '').trim().split('\n').map(l => l.trim()).find(l => l) || ''
+      )
+    );
+
     const clicked = [];
     const missed = [];
     const usedEntryIndices = new Set();
@@ -386,21 +395,13 @@ async function voteViaUI(page, job, votePlan) {
       const name = target.selectedEntry.name;
       const catName = target.matchup.name;
       const nameLower = name.toLowerCase().trim();
-
-      // Find all individual-entry-view elements whose first line matches the name
-      const allEntries = page.locator('.individual-entry-view');
-      const total = await allEntries.count();
       let found = false;
 
       for (let i = 0; i < total; i++) {
         if (usedEntryIndices.has(i)) continue;
-        const el = allEntries.nth(i);
-        const firstLine = await el.evaluate(node =>
-          (node.textContent || '').trim().split('\n').map(l => l.trim()).find(l => l) || ''
-        ).catch(() => '');
-        if (!firstLine.toLowerCase().includes(nameLower)) continue;
+        if (!entryNames[i].toLowerCase().includes(nameLower)) continue;
 
-        const btn = el.locator('.vote-button');
+        const btn = allEntries.nth(i).locator('.vote-button');
         if (await btn.count() === 0) continue;
 
         try {
@@ -414,6 +415,9 @@ async function voteViaUI(page, job, votePlan) {
         } catch {}
       }
       if (!found) missed.push({ name, catName });
+      if ((clicked.length + missed.length) % 10 === 0) {
+        log(job, `  Progress: ${clicked.length} voted, ${missed.length} skipped so far…`);
+      }
     }
 
     log(job, `Votes clicked: ${clicked.length}, missed: ${missed.length}`);
