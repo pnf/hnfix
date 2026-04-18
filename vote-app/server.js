@@ -15,6 +15,7 @@ const ORG_ID        = '2091414';
 const ORG_PROMO_ID  = '1143541';
 const PROMO_ID      = '977557';
 const BALLOT_URL    = 'https://rentonreporter2.secondstreetapp.com/Best-of-Renton-2026/gallery/?group=538674';
+const EMBED_URL     = 'https://embed-1143541.secondstreetapp.com/embed/ede68172-c907-4b3e-8116-dbcacb7ef1bb/gallery/?group=538674';
 const API_BASE      = 'https://rentonreporter2.secondstreetapp.com';
 const TARGET_NAME   = 'liberty cafe';
 
@@ -100,48 +101,40 @@ app.get('/debug/ballot', async (req, res) => {
 
     let navError = null;
     try {
-      await page.goto(BALLOT_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.goto(EMBED_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
     } catch (e) {
       navError = e.message;
     }
-    await page.waitForTimeout(8000);
+    // Wait for Ember to render inputs
+    await page.waitForSelector('input[type="radio"]', { timeout: 20000 }).catch(() => {});
 
     const title = await page.title().catch(() => '');
     const url = page.url();
     const html = await page.content().catch(() => '');
     const screenshot = await page.screenshot({ fullPage: false }).catch(() => null);
 
-    // Collect all frames
-    const frameInfo = page.frames().map(f => ({ url: f.url(), name: f.name() }));
-
-    // Find ballot frame — skip main frame, about:blank, Twitter
-    const ballotFrame = page.frames().find(f =>
-      f !== page.mainFrame() &&
-      f.url() !== 'about:blank' &&
-      !f.url().includes('twitter.com') &&
-      !f.url().includes('platform.')
-    ) || page.mainFrame();
-
-    const frameHtml = await ballotFrame.content().catch(() => '');
-    const frameInputs = await ballotFrame.evaluate(() =>
-      Array.from(document.querySelectorAll('input')).slice(0, 20).map(el => ({
+    const inputs = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('input')).slice(0, 30).map(el => ({
         type: el.type, name: el.name, id: el.id, value: el.value,
         placeholder: el.placeholder,
         label: (document.querySelector(`label[for="${el.id}"]`) || el.closest('label'))?.textContent?.trim(),
+        dataAttrs: Object.fromEntries(Array.from(el.attributes).filter(a => a.name.startsWith('data-')).map(a => [a.name, a.value])),
       }))
+    ).catch(() => []);
+
+    const sampleClasses = await page.evaluate(() =>
+      [...new Set(Array.from(document.querySelectorAll('*')).map(el => el.className).filter(c => typeof c === 'string' && c.length > 0))].slice(0, 40)
     ).catch(() => []);
 
     await browser.close();
     res.json({
       navError, redirectCount, redirectLog,
       title, url,
-      frames: frameInfo,
-      ballotFrameUrl: ballotFrame.url(),
-      mainHtmlLength: html.length,
-      mainHtmlPreview: html.substring(0, 3000),
-      ballotFrameHtmlLength: frameHtml.length,
-      ballotFrameHtmlPreview: frameHtml.substring(0, 6000),
-      ballotFrameInputs: frameInputs,
+      inputCount: inputs.length,
+      inputs,
+      sampleClasses,
+      htmlLength: html.length,
+      htmlPreview: html.substring(0, 8000),
       screenshotBase64: screenshot ? screenshot.toString('base64') : null,
     });
   } catch (err) {
@@ -214,43 +207,21 @@ async function performVoting(jobId) {
 
 async function voteViaUI(page, job, votePlan) {
   try {
-    let redirectCount = 0;
-    page.on('response', r => {
-      if (r.status() >= 300 && r.status() < 400 && r.url().includes('Best-of-Renton')) redirectCount++;
+    // Navigate directly to the embed URL (bypasses outer CMS wrapper/iframe)
+    log(job, `Loading embed ballot directly: ${EMBED_URL}`);
+    await page.goto(EMBED_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+
+    // Wait for Ember to render radio inputs — up to 30s
+    log(job, 'Waiting for ballot inputs to render…');
+    await page.waitForSelector('input[type="radio"]', { timeout: 30000 }).catch(() => {
+      log(job, 'No radio inputs appeared within 30s');
     });
 
-    await page.goto(BALLOT_URL, { waitUntil: 'load', timeout: 60000 });
-    // Wait for Ember/SPA to bootstrap and render
-    await page.waitForTimeout(5000);
-
-    if (redirectCount >= 8) {
-      log(job, 'Redirect loop detected — UI voting unavailable in this environment.');
-      return false;
-    }
-
     const title = await page.title();
-    log(job, `Ballot page loaded: "${title}"`);
-
-    // Detect all frames — ballot is embedded in an iframe on embed-XXXXXX.secondstreetapp.com
-    const frames = page.frames();
-    log(job, `Page frames: ${frames.map(f => f.url().substring(0, 80)).join(' | ')}`);
-
-    // Skip main frame, about:blank, and Twitter widget — ballot is first remaining frame
-    const ballotFrame = frames.find(f =>
-      f !== page.mainFrame() &&
-      f.url() !== 'about:blank' &&
-      !f.url().includes('twitter.com') &&
-      !f.url().includes('platform.')
-    ) || page.mainFrame();
-
-    if (ballotFrame !== page.mainFrame()) {
-      log(job, `Using ballot iframe: ${ballotFrame.url()}`);
-      // Give the iframe time to render its Ember app
-      await page.waitForTimeout(5000);
-    }
+    log(job, `Ballot page loaded: "${title}" — url: ${page.url()}`);
 
     // Explore frame structure
-    const pageInfo = await ballotFrame.evaluate(() => {
+    const pageInfo = await page.evaluate(() => {
       const inputs = Array.from(document.querySelectorAll('input[type="radio"], input[type="checkbox"]'))
         .map(el => ({
           type: el.type, name: el.name, value: el.value,
@@ -274,36 +245,30 @@ async function voteViaUI(page, job, votePlan) {
       };
     });
 
-    log(job, `Frame: ${pageInfo.inputCount} radio/checkbox inputs, ${pageInfo.buttonCount} buttons`);
+    log(job, `Page: ${pageInfo.inputCount} radio/checkbox inputs, ${pageInfo.buttonCount} buttons`);
     log(job, `Headings: ${pageInfo.headings.slice(0, 5).join(' | ')}`);
     log(job, `Sample classes: ${pageInfo.allClasses.slice(0, 10).join(', ')}`);
     if (pageInfo.sampleInputs.length > 0) {
       log(job, `Sample input: ${JSON.stringify(pageInfo.sampleInputs[0])}`);
     }
 
-    // Save ballot HTML for debugging
-    job.ballotHtml = await ballotFrame.content().catch(() => '');
+    job.ballotHtml = await page.content().catch(() => '');
 
-    // Strategy 1: vote by radio input label text
     let votedCount = 0;
     if (pageInfo.inputCount > 0) {
-      votedCount = await voteByRadioLabels(ballotFrame, job, votePlan);
+      votedCount = await voteByRadioLabels(page, job, votePlan);
     }
-
-    // Strategy 2: vote by clicking entry cards/buttons with text matching
     if (votedCount === 0) {
-      votedCount = await voteByTextContent(ballotFrame, job, votePlan);
+      votedCount = await voteByTextContent(page, job, votePlan);
     }
 
     log(job, `Voted in ${votedCount} categories via UI`);
 
-    // Scroll to and fill voter info form
     log(job, 'Filling in voter information…');
-    await fillVoterInfo(ballotFrame, job);
+    await fillVoterInfo(page, job);
 
-    // Submit
     log(job, 'Submitting ballot…');
-    const submitted = await submitBallot(ballotFrame, job);
+    const submitted = await submitBallot(page, job);
     if (submitted) {
       await page.waitForTimeout(4000);
       log(job, 'Ballot submitted successfully!');
