@@ -432,7 +432,16 @@ async function voteViaUI(page, job, votePlan) {
       return false;
     }
 
-    // Fill the registration form that appeared after first vote click
+    // Wait for the registration form to appear (triggered by first vote button click)
+    log(job, 'Waiting for registration form…');
+    const formVisible = await page.waitForSelector('input[type="text"]', { state: 'visible', timeout: 15000 })
+      .then(() => true).catch(() => false);
+    log(job, `Registration form visible: ${formVisible}`);
+
+    // Scroll back to top so the form is in view
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.waitForTimeout(500);
+
     log(job, 'Filling registration form…');
     await fillRegistrationForm(page, job);
 
@@ -458,9 +467,10 @@ async function voteViaUI(page, job, votePlan) {
         return true;
       }
       log(job, `Page text after submit: ${pageText.slice(0, 200)}`);
+      log(job, 'Ballot submit failed — API returned error or no success signal');
+      return false;
     }
 
-    log(job, 'Could not click VOTE submit button');
     return false;
   } catch (err) {
     log(job, `UI voting error: ${err.message}`);
@@ -471,7 +481,7 @@ async function voteViaUI(page, job, votePlan) {
 async function fillRegistrationForm(page, job) {
   const { firstName, lastName, email, zip } = job;
 
-  // Scroll the form into view
+  // Scroll the visible form fields into view
   const form = page.locator('.ssRegistrationField').first();
   if (await form.count() > 0) await form.scrollIntoViewIfNeeded().catch(() => {});
 
@@ -497,12 +507,14 @@ async function fillRegistrationForm(page, job) {
 
 async function clickVoteSubmitButton(page, job) {
   // The form submit button is type="submit"; ballot vote buttons are type="button"
+  await page.waitForSelector('button[type="submit"]', { state: 'visible', timeout: 10000 }).catch(() => {});
   const submit = page.locator('button[type="submit"]').first();
   if (await submit.count() > 0) {
     log(job, 'Clicking button[type="submit"]');
     await submit.click();
     return true;
   }
+  log(job, 'button[type="submit"] not found');
   return false;
 }
 
