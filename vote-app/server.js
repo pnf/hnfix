@@ -21,10 +21,11 @@ const TARGET_NAME   = 'liberty cafe';
 const LAUNCH_ARGS = [
   '--no-sandbox',
   '--disable-setuid-sandbox',
-  '--disable-dev-shm-usage',   // critical for Docker
+  '--disable-dev-shm-usage',
   '--disable-gpu',
   '--ignore-certificate-errors',
-  '--single-process',
+  '--disable-extensions',
+  '--disable-background-networking',
 ];
 
 // ── In-memory job store ─────────────────────────────────────────────────────
@@ -87,21 +88,60 @@ app.get('/debug/ballot', async (req, res) => {
   try {
     const ctx = await browser.newContext({ ignoreHTTPSErrors: true });
     const page = await ctx.newPage();
-    await page.goto(BALLOT_URL, { waitUntil: 'load', timeout: 60000 });
-    // Wait for Ember/SPA to bootstrap and render
-    await page.waitForTimeout(5000);
 
-    const title = await page.title();
+    let redirectCount = 0;
+    const redirectLog = [];
+    page.on('response', r => {
+      if (r.status() >= 300 && r.status() < 400) {
+        redirectCount++;
+        redirectLog.push({ status: r.status(), url: r.url() });
+      }
+    });
+
+    let navError = null;
+    try {
+      await page.goto(BALLOT_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    } catch (e) {
+      navError = e.message;
+    }
+    await page.waitForTimeout(8000);
+
+    const title = await page.title().catch(() => '');
     const url = page.url();
-    const html = await page.content();
-    const screenshot = await page.screenshot({ fullPage: true });
+    const html = await page.content().catch(() => '');
+    const screenshot = await page.screenshot({ fullPage: false }).catch(() => null);
+
+    // Collect all frames
+    const frameInfo = page.frames().map(f => ({ url: f.url(), name: f.name() }));
+
+    // Find ballot frame
+    const ballotFrame = page.frames().find(f =>
+      f.url().includes('secondstreet') || f.url().includes('ss-') ||
+      f.url().includes('ballot') || f.url().includes('gallery') ||
+      (f !== page.mainFrame() && f.url() !== 'about:blank')
+    ) || page.mainFrame();
+
+    const frameHtml = await ballotFrame.content().catch(() => '');
+    const frameInputs = await ballotFrame.evaluate(() =>
+      Array.from(document.querySelectorAll('input')).slice(0, 20).map(el => ({
+        type: el.type, name: el.name, id: el.id, value: el.value,
+        placeholder: el.placeholder,
+        label: (document.querySelector(`label[for="${el.id}"]`) || el.closest('label'))?.textContent?.trim(),
+      }))
+    ).catch(() => []);
 
     await browser.close();
     res.json({
+      navError, redirectCount, redirectLog,
       title, url,
-      htmlLength: html.length,
-      htmlPreview: html.substring(0, 8000),
-      screenshotBase64: screenshot.toString('base64'),
+      frames: frameInfo,
+      ballotFrameUrl: ballotFrame.url(),
+      mainHtmlLength: html.length,
+      mainHtmlPreview: html.substring(0, 3000),
+      ballotFrameHtmlLength: frameHtml.length,
+      ballotFrameHtmlPreview: frameHtml.substring(0, 6000),
+      ballotFrameInputs: frameInputs,
+      screenshotBase64: screenshot ? screenshot.toString('base64') : null,
     });
   } catch (err) {
     await browser.close().catch(() => {});
@@ -190,9 +230,26 @@ async function voteViaUI(page, job, votePlan) {
     const title = await page.title();
     log(job, `Ballot page loaded: "${title}"`);
 
-    // Explore page structure so we can vote intelligently
-    const pageInfo = await page.evaluate(() => {
-      // Collect all interactive elements and their text
+    // Detect all frames — ballot may be inside an iframe
+    const frames = page.frames();
+    log(job, `Page frames: ${frames.map(f => f.url().substring(0, 80)).join(' | ')}`);
+
+    // Pick the frame most likely to contain the ballot
+    const ballotFrame = frames.find(f =>
+      f !== page.mainFrame() &&
+      f.url() !== 'about:blank' &&
+      (f.url().includes('secondstreet') || f.url().includes('gallery') ||
+       f.url().includes('ballot') || f.url().includes('Best-of-Renton'))
+    ) || page.mainFrame();
+
+    if (ballotFrame !== page.mainFrame()) {
+      log(job, `Using ballot iframe: ${ballotFrame.url()}`);
+      // Give the iframe time to render its Ember app
+      await page.waitForTimeout(5000);
+    }
+
+    // Explore frame structure
+    const pageInfo = await ballotFrame.evaluate(() => {
       const inputs = Array.from(document.querySelectorAll('input[type="radio"], input[type="checkbox"]'))
         .map(el => ({
           type: el.type, name: el.name, value: el.value,
@@ -205,53 +262,47 @@ async function voteViaUI(page, job, votePlan) {
         .slice(0, 40)
         .map(el => ({ text: el.textContent?.trim(), classes: el.className, disabled: el.disabled }));
 
-      // Look for group/category containers
-      const bodyClasses = document.body.className;
-      const appDiv = document.querySelector('#ember-application, #app, .ember-application, [class*="contest"], [class*="ballot"]');
-
       return {
         inputCount: inputs.length,
         sampleInputs: inputs.slice(0, 20),
         buttonCount: buttons.length,
         sampleButtons: buttons.slice(0, 15),
-        bodyClasses,
-        appClass: appDiv?.className?.slice(0, 100),
+        bodyClasses: document.body.className,
         headings: Array.from(document.querySelectorAll('h1,h2,h3,h4')).slice(0, 20).map(h => h.textContent?.trim()),
         allClasses: [...new Set(Array.from(document.querySelectorAll('*')).map(el => el.className).filter(c => typeof c === 'string' && c.length > 0))].slice(0, 60),
       };
     });
 
-    log(job, `Page: ${pageInfo.inputCount} radio/checkbox inputs, ${pageInfo.buttonCount} buttons`);
+    log(job, `Frame: ${pageInfo.inputCount} radio/checkbox inputs, ${pageInfo.buttonCount} buttons`);
     log(job, `Headings: ${pageInfo.headings.slice(0, 5).join(' | ')}`);
     log(job, `Sample classes: ${pageInfo.allClasses.slice(0, 10).join(', ')}`);
-
     if (pageInfo.sampleInputs.length > 0) {
       log(job, `Sample input: ${JSON.stringify(pageInfo.sampleInputs[0])}`);
     }
 
     // Save ballot HTML for debugging
-    job.ballotHtml = await page.content();
+    job.ballotHtml = await ballotFrame.content().catch(() => '');
 
     // Strategy 1: vote by radio input label text
     let votedCount = 0;
     if (pageInfo.inputCount > 0) {
-      votedCount = await voteByRadioLabels(page, job, votePlan);
+      votedCount = await voteByRadioLabels(ballotFrame, job, votePlan);
     }
 
     // Strategy 2: vote by clicking entry cards/buttons with text matching
     if (votedCount === 0) {
-      votedCount = await voteByTextContent(page, job, votePlan);
+      votedCount = await voteByTextContent(ballotFrame, job, votePlan);
     }
 
     log(job, `Voted in ${votedCount} categories via UI`);
 
     // Scroll to and fill voter info form
     log(job, 'Filling in voter information…');
-    await fillVoterInfo(page, job);
+    await fillVoterInfo(ballotFrame, job);
 
     // Submit
     log(job, 'Submitting ballot…');
-    const submitted = await submitBallot(page, job);
+    const submitted = await submitBallot(ballotFrame, job);
     if (submitted) {
       await page.waitForTimeout(4000);
       log(job, 'Ballot submitted successfully!');
@@ -265,14 +316,13 @@ async function voteViaUI(page, job, votePlan) {
   }
 }
 
-async function voteByRadioLabels(page, job, votePlan) {
-  // Build lookup: entry name → vote plan entry
+async function voteByRadioLabels(frame, job, votePlan) {
   const entryByName = {};
   for (const v of votePlan) {
-    entryByName[v.selectedEntry.name.toLowerCase().trim()] = v;
+    entryByName[v.selectedEntry.name.toLowerCase().trim()] = true;
   }
 
-  const clicked = await page.evaluate((nameMap) => {
+  const clicked = await frame.evaluate((nameMap) => {
     let count = 0;
     const inputs = Array.from(document.querySelectorAll('input[type="radio"]'));
     for (const input of inputs) {
@@ -289,14 +339,12 @@ async function voteByRadioLabels(page, job, votePlan) {
   return clicked;
 }
 
-async function voteByTextContent(page, job, votePlan) {
-  // Try clicking on entry containers that contain the target text
+async function voteByTextContent(frame, job, votePlan) {
   const entryNames = votePlan.map(v => v.selectedEntry.name);
   let count = 0;
 
   for (const name of entryNames) {
     try {
-      // Try various selector strategies
       const selectors = [
         `[class*="entry"]:has-text("${name}")`,
         `[class*="option"]:has-text("${name}")`,
@@ -306,7 +354,7 @@ async function voteByTextContent(page, job, votePlan) {
       ];
       for (const sel of selectors) {
         try {
-          const el = page.locator(sel).first();
+          const el = frame.locator(sel).first();
           if (await el.count() > 0) {
             await el.click({ timeout: 2000 });
             count++;
@@ -319,12 +367,11 @@ async function voteByTextContent(page, job, votePlan) {
   return count;
 }
 
-async function fillVoterInfo(page, job) {
+async function fillVoterInfo(frame, job) {
   const { email, firstName, lastName, zip } = job;
 
-  // Scroll down to find the form
-  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-  await page.waitForTimeout(500);
+  await frame.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  await frame.waitForTimeout(500);
 
   const fieldMap = [
     { selectors: ['input[type="email"]', 'input[name*="email"]', 'input[id*="email"]', 'input[placeholder*="mail"]'], value: email },
@@ -337,14 +384,14 @@ async function fillVoterInfo(page, job) {
     if (!value) continue;
     for (const sel of selectors) {
       try {
-        const el = await page.$(sel);
+        const el = await frame.$(sel);
         if (el) { await el.fill(value); break; }
       } catch {}
     }
   }
 }
 
-async function submitBallot(page, job) {
+async function submitBallot(frame, job) {
   const submitSelectors = [
     'button[type="submit"]',
     'input[type="submit"]',
@@ -355,7 +402,7 @@ async function submitBallot(page, job) {
 
   for (const sel of submitSelectors) {
     try {
-      const btn = await page.$(sel);
+      const btn = await frame.$(sel);
       if (btn) {
         await btn.scrollIntoViewIfNeeded();
         await btn.click();
@@ -364,10 +411,9 @@ async function submitBallot(page, job) {
     } catch {}
   }
 
-  // Text-based fallback
   for (const text of ['Submit', 'Vote', 'Cast My Vote', 'Submit Votes']) {
     try {
-      await page.getByRole('button', { name: text, exact: false }).click({ timeout: 2000 });
+      await frame.getByRole('button', { name: text, exact: false }).click({ timeout: 2000 });
       return true;
     } catch {}
   }
