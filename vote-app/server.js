@@ -4,6 +4,52 @@ const { randomUUID } = require('crypto');
 const fs = require('fs');
 const { chromium } = require('playwright');
 
+// ── Voter identity generation ─────────────────────────────────────────────────
+
+const FIRST_NAMES = [
+  'James','John','Robert','Michael','David','William','Richard','Joseph',
+  'Thomas','Charles','Mary','Patricia','Jennifer','Linda','Barbara','Susan',
+  'Jessica','Sarah','Karen','Lisa','Emily','Ashley','Amanda','Melissa',
+  'Stephanie','Rebecca','Laura','Sharon','Cynthia','Kathleen','Amy','Angela',
+  'Brenda','Emma','Nicole','Helen','Sandra','Deborah','Ruth','Anna',
+  'Kevin','Brian','George','Edward','Ronald','Timothy','Jason','Jeffrey',
+  'Ryan','Gary','Larry','Eric','Stephen','Scott','Mark','Daniel','Paul',
+  'Andrew','Kenneth','Joshua','Margaret','Dorothy','Betty','Christine',
+];
+
+const LAST_NAMES = [
+  'Smith','Johnson','Williams','Brown','Jones','Garcia','Miller','Davis',
+  'Wilson','Anderson','Taylor','Thomas','Jackson','White','Harris','Martin',
+  'Thompson','Young','Robinson','Walker','Hall','Allen','King','Wright',
+  'Scott','Green','Baker','Adams','Nelson','Carter','Mitchell','Perez',
+  'Roberts','Turner','Phillips','Campbell','Parker','Evans','Edwards','Collins',
+  'Stewart','Morris','Sanchez','Rogers','Reed','Cook','Bell','Cooper',
+  'Richardson','Cox','Howard','Ward','Torres','Peterson','Gray','Ramirez',
+  'Murphy','Rivera','Brooks','Nguyen','Kelly','Sanders','Price','Bennett',
+];
+
+// Zip codes for Renton and nearby communities
+const RENTON_ZIPS = [
+  '98055','98056','98057','98058','98059', // Renton
+  '98030','98031','98042',                 // Kent
+  '98001','98002','98003',                 // Auburn
+  '98168','98188',                         // Tukwila / SeaTac
+  '98038',                                 // Maple Valley
+  '98006','98007','98008',                 // Bellevue (east side)
+  '98178',                                 // Skyway / South Seattle
+];
+
+function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+
+function generateVoterIdentity(overrides = {}) {
+  const firstName = overrides.firstName || pick(FIRST_NAMES);
+  const lastName  = overrides.lastName  || pick(LAST_NAMES);
+  const zip       = overrides.zip       || pick(RENTON_ZIPS);
+  const email     = overrides.email     ||
+    `${firstName.toLowerCase()}.${lastName.toLowerCase()}${Math.floor(Math.random() * 900) + 100}@gmail.com`;
+  return { firstName, lastName, email, zip };
+}
+
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -35,13 +81,13 @@ const jobs = new Map();
 // ── Routes ──────────────────────────────────────────────────────────────────
 
 app.post('/vote', (req, res) => {
-  const { email, firstName, lastName, zip } = req.body;
-  if (!email) return res.status(400).json({ error: 'Email is required' });
+  const identity = generateVoterIdentity(req.body);
+  const { email, firstName, lastName, zip } = identity;
 
   const jobId = randomUUID();
   jobs.set(jobId, {
     status: 'queued',
-    email, firstName: firstName || '', lastName: lastName || '', zip: zip || '',
+    email, firstName, lastName, zip,
     log: [],
     pdfPath: null,
     screenshotPath: null,
@@ -292,6 +338,7 @@ async function performVoting(jobId) {
 
     // 1. Fetch ballot data
     const dataPage = await context.newPage();
+    log(job, `Voter identity: ${job.firstName} ${job.lastName} <${job.email}> ZIP ${job.zip}`);
     log(job, 'Fetching ballot categories and entries from API…');
     const { matchups, groups, entries } = await fetchBallotData(dataPage);
     await dataPage.close().catch(() => {});
@@ -497,7 +544,10 @@ async function fillRegistrationForm(page, job) {
   if (textCount >= 1) await textInputs.nth(0).fill(firstName || 'Voter').catch(() => {});
   if (textCount >= 2) await textInputs.nth(1).fill(lastName  || 'Vote').catch(() => {});
   await emailInput.first().fill(email).catch(() => {});
-  await dateInput.first().fill('1990-01-15').catch(() => {});
+  const birthYear = 1955 + Math.floor(Math.random() * 45); // 1955–1999
+  const birthMonth = String(Math.floor(Math.random() * 12) + 1).padStart(2, '0');
+  const birthDay   = String(Math.floor(Math.random() * 28) + 1).padStart(2, '0');
+  await dateInput.first().fill(`${birthYear}-${birthMonth}-${birthDay}`).catch(() => {});
   if (textCount >= 3) await textInputs.nth(2).fill(zip || '98055').catch(() => {});
 
   // Check any unchecked checkboxes (terms, marketing opt-in, etc.)
