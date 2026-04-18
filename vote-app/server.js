@@ -83,77 +83,191 @@ app.get('/screenshot/:jobId', (req, res) => {
   res.sendFile(job.screenshotPath);
 });
 
-// Debug: explore the ballot page and return its structure (pre- and post-login)
+// Debug: intercept network calls, scroll ballot, click vote buttons, capture API traffic
 app.get('/debug/ballot', async (req, res) => {
+  const browser = await chromium.launch({ headless: true, executablePath: findChromium(), args: LAUNCH_ARGS });
+  const networkLog = [];
+  try {
+    const ctx = await browser.newContext({ ignoreHTTPSErrors: true });
+    const page = await ctx.newPage();
+
+    // Intercept all XHR/fetch requests
+    page.on('request', req => {
+      if (req.resourceType() === 'xhr' || req.resourceType() === 'fetch') {
+        const entry = { type: 'req', method: req.method(), url: req.url(), postData: null };
+        try { entry.postData = req.postData(); } catch {}
+        networkLog.push(entry);
+      }
+    });
+    page.on('response', async resp => {
+      if (resp.request().resourceType() === 'xhr' || resp.request().resourceType() === 'fetch') {
+        const entry = { type: 'resp', status: resp.status(), url: resp.url(), body: null };
+        try { entry.body = (await resp.text()).slice(0, 1000); } catch {}
+        networkLog.push(entry);
+      }
+    });
+
+    let navError = null;
+    try {
+      await page.goto(EMBED_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    } catch (e) { navError = e.message; }
+    await page.waitForTimeout(5000);
+
+    // Scroll fully to load all categories
+    await page.evaluate(async () => {
+      for (let i = 0; i < 30; i++) {
+        window.scrollBy(0, window.innerHeight);
+        await new Promise(r => setTimeout(r, 300));
+      }
+      window.scrollTo(0, 0);
+    });
+    await page.waitForTimeout(2000);
+
+    // Snapshot after scrolling
+    const entryNames = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('.individual-entry-view')).map(el => ({
+        name: el.textContent?.trim().split('\n')[0].trim().slice(0, 60),
+        hasVoteBtn: !!el.querySelector('.vote-button'),
+      }))
+    ).catch(() => []);
+
+    const libertyCafeEntries = entryNames.filter(e =>
+      e.name?.toLowerCase().includes('liberty')
+    );
+
+    const screenshotPre = await page.screenshot({ fullPage: false }).catch(() => null);
+
+    // Click vote button for first Liberty Cafe entry found
+    let voteClicked = false;
+    let voteClickError = null;
+    const lcEntry = await page.evaluate(() => {
+      const all = Array.from(document.querySelectorAll('.individual-entry-view'));
+      for (const el of all) {
+        if (el.textContent?.toLowerCase().includes('liberty cafe')) {
+          const btn = el.querySelector('.vote-button');
+          if (btn) { btn.click(); return { found: true, name: el.textContent?.trim().split('\n')[0] }; }
+          return { found: true, noBtnFound: true };
+        }
+      }
+      return { found: false };
+    }).catch(e => ({ error: e.message }));
+    if (lcEntry.found && !lcEntry.noBtnFound) { voteClicked = true; await page.waitForTimeout(1000); }
+    else { voteClickError = JSON.stringify(lcEntry); }
+
+    const screenshotAfterVote = await page.screenshot({ fullPage: false }).catch(() => null);
+
+    // Click Already Entered? button
+    let loginClicked = false;
+    const loginBtn = page.locator('.login-prompt-button').first();
+    if (await loginBtn.count() > 0) {
+      await loginBtn.click();
+      loginClicked = true;
+      await page.waitForTimeout(2000);
+    }
+
+    // Fill email only (that's all the form needs)
+    await page.fill('input[type="email"]', 'test@example.com').catch(() => {});
+    await page.waitForTimeout(500);
+
+    const screenshotEmailForm = await page.screenshot({ fullPage: false }).catch(() => null);
+
+    // Click submit (DO NOT actually submit - just snapshot)
+    const submitBtn = await page.$('.submit-button');
+    const submitBtnFound = !!submitBtn;
+
+    await browser.close();
+    res.json({
+      navError,
+      totalEntries: entryNames.length,
+      libertyCafeEntries,
+      lcEntry,
+      voteClicked,
+      voteClickError,
+      loginClicked,
+      submitBtnFound,
+      networkLog: networkLog.slice(0, 40),
+      screenshotPreBase64: screenshotPre?.toString('base64') ?? null,
+      screenshotAfterVoteBase64: screenshotAfterVote?.toString('base64') ?? null,
+      screenshotEmailFormBase64: screenshotEmailForm?.toString('base64') ?? null,
+    });
+  } catch (err) {
+    await browser.close().catch(() => {});
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Debug: explore SPA navigation - find group links, test multi-group navigation
+app.get('/debug/nav', async (req, res) => {
+  const EMBED_BASE = 'https://embed-1143541.secondstreetapp.com/embed/ede68172-c907-4b3e-8116-dbcacb7ef1bb/gallery/';
   const browser = await chromium.launch({ headless: true, executablePath: findChromium(), args: LAUNCH_ARGS });
   try {
     const ctx = await browser.newContext({ ignoreHTTPSErrors: true });
     const page = await ctx.newPage();
 
-    let navError = null;
-    try {
-      await page.goto(EMBED_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    } catch (e) {
-      navError = e.message;
-    }
+    await page.goto(EMBED_BASE + '?group=538674', { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(5000);
 
-    const snap = async (label) => ({
-      label,
-      inputs: await page.evaluate(() =>
-        Array.from(document.querySelectorAll('input')).slice(0, 20).map(el => ({
-          type: el.type, name: el.name, id: el.id, placeholder: el.placeholder,
-          label: (document.querySelector(`label[for="${el.id}"]`) || el.closest('label'))?.textContent?.trim(),
-        }))
-      ).catch(() => []),
-      buttons: await page.evaluate(() =>
-        Array.from(document.querySelectorAll('button, [role="button"]')).slice(0, 30).map(el => ({
-          text: el.textContent?.trim().slice(0, 60), cls: el.className,
-        }))
-      ).catch(() => []),
-      sampleClasses: await page.evaluate(() =>
-        [...new Set(Array.from(document.querySelectorAll('*')).map(el => el.className).filter(c => typeof c === 'string' && c.trim()))].slice(0, 50)
-      ).catch(() => []),
-      entryEls: await page.evaluate(() =>
-        Array.from(document.querySelectorAll('[class*="entry"],[class*="contestant"],[class*="nominee"],[class*="gallery-item"],[class*="card"]')).slice(0, 10).map(el => ({
-          cls: el.className,
-          text: el.textContent?.trim().slice(0, 120),
-        }))
-      ).catch(() => []),
-      htmlPreview: (await page.content().catch(() => '')).substring(0, 6000),
+    // Scroll to load all entries
+    await page.evaluate(async () => {
+      for (let i = 0; i < 60; i++) { window.scrollBy(0, window.innerHeight); await new Promise(r => setTimeout(r, 200)); }
+      window.scrollTo(0, 0);
+    });
+    await page.waitForTimeout(1000);
+
+    const group538674Count = await page.evaluate(() =>
+      document.querySelectorAll('.individual-entry-view').length
+    );
+
+    // Find group navigation links
+    const navLinks = await page.evaluate(() => {
+      const links = Array.from(document.querySelectorAll('a[href*="group="], a[href*="gallery"]'))
+        .map(a => ({ text: a.textContent?.trim().slice(0,50), href: a.href, cls: a.className }));
+      const breadcrumb = document.querySelector('.breadcrumb-navigation');
+      const breadHtml = breadcrumb?.outerHTML?.slice(0, 2000) || '';
+      return { links: links.slice(0,20), breadHtml };
     });
 
-    const prelog = await snap('pre-login');
-    const screenshotPre = await page.screenshot({ fullPage: false }).catch(() => null);
+    // Try clicking a vote button to set state, then navigate to another group
+    const voteResult = await page.evaluate(() => {
+      const entries = Array.from(document.querySelectorAll('.individual-entry-view'));
+      const firstBtn = entries[0]?.querySelector('.vote-button');
+      if (firstBtn) { firstBtn.click(); return { clicked: entries[0]?.textContent?.trim().split('\n')[0] }; }
+      return { clicked: null };
+    });
 
-    // Click login-prompt-button
-    let loginClicked = false;
-    let loginClickError = null;
-    const loginBtn = page.locator('.login-prompt-button').first();
-    if (await loginBtn.count() > 0) {
-      try {
-        await loginBtn.click();
-        loginClicked = true;
-        await page.waitForTimeout(2000);
-      } catch (e) {
-        loginClickError = e.message;
-      }
-    }
+    // Navigate to the ballot without group filter (test if votes persist)
+    await page.goto(EMBED_BASE, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(5000);
 
-    // Fill dummy voter info in the modal
-    const dummyJob = { email: 'test@example.com', firstName: 'Test', lastName: 'User', zip: '98055' };
-    const fillLog = [];
-    await fillVoterInfoInModal(page, { ...dummyJob, log: [] }, fillLog);
+    await page.evaluate(async () => {
+      for (let i = 0; i < 60; i++) { window.scrollBy(0, window.innerHeight); await new Promise(r => setTimeout(r, 200)); }
+      window.scrollTo(0, 0);
+    });
+    await page.waitForTimeout(1000);
 
-    const postlog = await snap('post-login-form-filled');
-    const screenshotPost = await page.screenshot({ fullPage: false }).catch(() => null);
+    const afterNavInfo = await page.evaluate(() => {
+      const entries = Array.from(document.querySelectorAll('.individual-entry-view'));
+      // Check if any vote button looks "selected" (different class or aria)
+      const selectedBtns = Array.from(document.querySelectorAll('.vote-button')).filter(b =>
+        b.className.includes('selected') || b.className.includes('voted') || b.getAttribute('aria-pressed') === 'true'
+      );
+      return {
+        entryCount: entries.length,
+        selectedBtns: selectedBtns.length,
+        firstNames: entries.slice(0,5).map(e => e.textContent?.trim().split('\n')[0]),
+        // check group navigation links
+        groupLinks: Array.from(document.querySelectorAll('a[href*="group="]')).map(a => ({
+          text: a.textContent?.trim().slice(0,40), href: a.href,
+        })),
+      };
+    });
+
+    const screenshot = await page.screenshot({ fullPage: false }).catch(() => null);
 
     await browser.close();
     res.json({
-      navError, loginClicked, loginClickError, fillLog,
-      prelog, postlog,
-      screenshotPreBase64: screenshotPre ? screenshotPre.toString('base64') : null,
-      screenshotPostBase64: screenshotPost ? screenshotPost.toString('base64') : null,
+      group538674Count, navLinks, voteResult, afterNavInfo,
+      screenshotBase64: screenshot?.toString('base64') ?? null,
     });
   } catch (err) {
     await browser.close().catch(() => {});
@@ -222,65 +336,127 @@ async function performVoting(jobId) {
 }
 
 // ── UI-based voting via Playwright ───────────────────────────────────────────
+//
+// The 2nd Street ballot flow:
+//   1. Click "Vote" on any entry → inline registration form appears
+//   2. (Optionally click more vote buttons before submitting)
+//   3. Fill name / email / birthdate / zip in the form
+//   4. Click the green "VOTE" button → ballot submitted
+//
+// "Already Entered?" is only for returning participants (already registered).
 
 async function voteViaUI(page, job, votePlan) {
   try {
     log(job, `Loading embed ballot: ${EMBED_URL}`);
-    await page.goto(EMBED_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
-    log(job, 'Waiting for Ember SPA to render…');
+    // Intercept form submission response to detect errors
+    const apiResults = [];
+    page.on('response', async resp => {
+      if (resp.url().includes('/api/form_page_submissions') || resp.url().includes('/api/login_email')) {
+        const body = await resp.text().catch(() => '');
+        apiResults.push({ url: resp.url(), status: resp.status(), body: body.slice(0, 400) });
+      }
+    });
+
+    await page.goto(EMBED_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.waitForTimeout(5000);
 
-    // Step 1: scroll to trigger lazy-loading of all entries
+    // Scroll incrementally to trigger lazy-loading
     log(job, 'Scrolling to load all ballot entries…');
     await page.evaluate(async () => {
-      const step = 800;
-      for (let y = 0; y < Math.min(document.body.scrollHeight, 60000); y += step) {
-        window.scrollTo(0, y);
-        await new Promise(r => setTimeout(r, 80));
+      for (let i = 0; i < 60; i++) {
+        window.scrollBy(0, window.innerHeight);
+        await new Promise(r => setTimeout(r, 200));
       }
       window.scrollTo(0, 0);
     });
     await page.waitForTimeout(1000);
 
-    // Log pre-vote state
-    const preInfo = await page.evaluate(() => ({
-      entryCount: document.querySelectorAll('[class*="individual-entry"]').length,
-      voteButtons: document.querySelectorAll('.vote-button, [class*="voting-button"]').length,
-      loginBtn: document.querySelectorAll('.login-prompt-button').length,
-    })).catch(() => ({}));
-    log(job, `Pre-vote: ${preInfo.entryCount} entries, ${preInfo.voteButtons} vote-buttons, ${preInfo.loginBtn} login-btn`);
+    const entryCount = await page.evaluate(() =>
+      document.querySelectorAll('.individual-entry-view').length
+    );
+    log(job, `Entries in DOM: ${entryCount}`);
 
-    // Step 2: vote on gallery entries BEFORE authenticating
-    const votedCount = await voteOnGalleryEntries(page, job, votePlan);
-    log(job, `Voted in ${votedCount} categories via UI`);
+    // Click vote buttons using Playwright locators (triggers Ember properly)
+    const clicked = [];
+    const missed = [];
+    const usedEntryIndices = new Set();
 
-    // Step 3: click "Already Entered?" (login-prompt-button) to authenticate
-    const loginBtn = page.locator('.login-prompt-button').first();
-    if (await loginBtn.count() > 0) {
-      log(job, 'Clicking login-prompt-button to authenticate…');
-      await loginBtn.click();
-      await page.waitForTimeout(2000);
+    for (const target of votePlan) {
+      const name = target.selectedEntry.name;
+      const catName = target.matchup.name;
+      const nameLower = name.toLowerCase().trim();
 
-      // Step 4: fill voter info
-      log(job, 'Filling voter info…');
-      const fillLog = [];
-      await fillVoterInfoInModal(page, job, fillLog);
-      for (const msg of fillLog) log(job, msg);
+      // Find all individual-entry-view elements whose first line matches the name
+      const allEntries = page.locator('.individual-entry-view');
+      const total = await allEntries.count();
+      let found = false;
 
-      // Step 5: submit voter info
-      log(job, 'Submitting voter info…');
-      const formSubmitted = await submitVoterInfoModal(page, job);
-      if (formSubmitted) {
-        log(job, 'Voter info submitted successfully!');
-        await page.waitForTimeout(4000);
-        return true;
+      for (let i = 0; i < total; i++) {
+        if (usedEntryIndices.has(i)) continue;
+        const el = allEntries.nth(i);
+        const firstLine = await el.evaluate(node =>
+          (node.textContent || '').trim().split('\n').map(l => l.trim()).find(l => l) || ''
+        ).catch(() => '');
+        if (!firstLine.toLowerCase().includes(nameLower)) continue;
+
+        const btn = el.locator('.vote-button');
+        if (await btn.count() === 0) continue;
+
+        try {
+          await btn.first().scrollIntoViewIfNeeded();
+          await btn.first().click();
+          await page.waitForTimeout(200);
+          usedEntryIndices.add(i);
+          clicked.push({ name, catName });
+          found = true;
+          break;
+        } catch {}
       }
-      log(job, 'WARNING: could not submit voter info form');
-    } else {
-      log(job, 'login-prompt-button not found');
+      if (!found) missed.push({ name, catName });
     }
 
+    log(job, `Votes clicked: ${clicked.length}, missed: ${missed.length}`);
+    for (const c of clicked.filter(c => c.name.toLowerCase().includes('liberty'))) {
+      log(job, `  ✓ Liberty Cafe in "${c.catName}"`);
+    }
+    const libertyMissed = missed.filter(m => m.name.toLowerCase().includes('liberty'));
+    if (libertyMissed.length > 0) log(job, `  LIBERTY MISSED: ${JSON.stringify(libertyMissed)}`);
+
+    if (clicked.length === 0) {
+      log(job, 'No votes clicked — cannot submit ballot');
+      return false;
+    }
+
+    // Fill the registration form that appeared after first vote click
+    log(job, 'Filling registration form…');
+    await fillRegistrationForm(page, job);
+
+    // Click the green VOTE button to submit
+    log(job, 'Clicking VOTE button…');
+    const submitted = await clickVoteSubmitButton(page, job);
+    if (submitted) {
+      await page.waitForTimeout(4000);
+      // Check API response for success/error
+      for (const r of apiResults) {
+        if (r.status >= 400) {
+          log(job, `API error ${r.status}: ${r.body.slice(0, 200)}`);
+        } else if (r.status === 200 || r.status === 201) {
+          log(job, `API success ${r.status} → ballot submitted!`);
+          return true;
+        }
+      }
+      if (apiResults.length === 0) log(job, 'No API response captured after VOTE click');
+      // Check page for success message
+      const pageText = await page.evaluate(() => document.body.innerText.slice(0, 500)).catch(() => '');
+      if (pageText.toLowerCase().includes('thank') || pageText.toLowerCase().includes('success')) {
+        log(job, 'Success message detected on page');
+        return true;
+      }
+      log(job, `Page text after submit: ${pageText.slice(0, 200)}`);
+    }
+
+    log(job, 'Could not click VOTE submit button');
     return false;
   } catch (err) {
     log(job, `UI voting error: ${err.message}`);
@@ -288,182 +464,44 @@ async function voteViaUI(page, job, votePlan) {
   }
 }
 
-async function fillVoterInfoInModal(page, job, fillLog = []) {
-  const { email, firstName, lastName, zip } = job;
+async function fillRegistrationForm(page, job) {
+  const { firstName, lastName, email, zip } = job;
 
-  const fieldMap = [
-    { selectors: ['input[type="email"]', 'input[name*="email" i]', 'input[id*="email" i]', 'input[placeholder*="email" i]', 'input[placeholder*="mail" i]'], value: email },
-    { selectors: ['input[name*="first" i]', 'input[id*="first" i]', 'input[placeholder*="first" i]'], value: firstName },
-    { selectors: ['input[name*="last" i]', 'input[id*="last" i]', 'input[placeholder*="last" i]'], value: lastName },
-    { selectors: ['input[name*="zip" i]', 'input[id*="zip" i]', 'input[placeholder*="zip" i]', 'input[placeholder*="postal" i]'], value: zip },
-  ];
+  // Scroll the form into view
+  const form = page.locator('.ssRegistrationField').first();
+  if (await form.count() > 0) await form.scrollIntoViewIfNeeded().catch(() => {});
 
-  for (const { selectors, value } of fieldMap) {
-    if (!value) continue;
-    for (const sel of selectors) {
-      try {
-        const el = await page.$(sel);
-        if (el) {
-          await el.fill(value);
-          fillLog.push(`Filled "${sel}" = "${value}"`);
-          break;
-        }
-      } catch {}
-    }
-  }
+  // The form fields in order: text[0]=First Name, text[1]=Last Name,
+  // email[0]=Email, date[0]=Birthdate, text[2]=Postal Code
+  const textInputs = page.locator('input[type="text"]');
+  const emailInput = page.locator('input[type="email"]');
+  const dateInput  = page.locator('input[type="date"]');
 
-  // Check any unchecked checkboxes (age verification, terms, etc.)
+  const textCount = await textInputs.count();
+  log(job, `Form inputs: ${textCount} text, email=${await emailInput.count()}, date=${await dateInput.count()}`);
+
+  if (textCount >= 1) await textInputs.nth(0).fill(firstName || 'Voter').catch(() => {});
+  if (textCount >= 2) await textInputs.nth(1).fill(lastName  || 'Vote').catch(() => {});
+  await emailInput.first().fill(email).catch(() => {});
+  await dateInput.first().fill('1990-01-15').catch(() => {});
+  if (textCount >= 3) await textInputs.nth(2).fill(zip || '98055').catch(() => {});
+
+  // Check any unchecked checkboxes (terms, marketing opt-in, etc.)
   const checkboxes = await page.$$('input[type="checkbox"]:not(:checked)');
-  for (const cb of checkboxes) {
-    try { await cb.check(); fillLog.push('Checked a checkbox'); } catch {}
-  }
+  for (const cb of checkboxes) await cb.check().catch(() => {});
 }
 
-async function submitVoterInfoModal(page, job) {
-  const submitSelectors = [
-    'button[type="submit"]',
-    'input[type="submit"]',
-    '[class*="submit"]',
-    '[class*="register"]',
-    '[class*="continue"]',
-  ];
-  for (const sel of submitSelectors) {
-    try {
-      const btn = await page.$(sel);
-      if (btn) {
-        log(job, `Submitting voter form via: ${sel}`);
-        await btn.click();
-        return true;
-      }
-    } catch {}
-  }
-  for (const text of ['Submit', 'Continue', 'Register', 'Sign In', 'Enter', 'Login']) {
-    try {
-      const btn = page.getByRole('button', { name: text, exact: false });
-      if (await btn.count() > 0) {
-        log(job, `Submitting voter form via button text: "${text}"`);
-        await btn.click();
-        return true;
-      }
-    } catch {}
+async function clickVoteSubmitButton(page, job) {
+  // The form submit button is type="submit"; ballot vote buttons are type="button"
+  const submit = page.locator('button[type="submit"]').first();
+  if (await submit.count() > 0) {
+    log(job, 'Clicking button[type="submit"]');
+    await submit.click();
+    return true;
   }
   return false;
 }
 
-async function voteOnGalleryEntries(page, job, votePlan) {
-  // Build plain-object lookup: lowercase entry name → category name (for logging)
-  const entryLookup = {};
-  for (const v of votePlan) {
-    entryLookup[v.selectedEntry.name.toLowerCase().trim()] = v.matchup.name || '';
-  }
-
-  const result = await page.evaluate((lookup) => {
-    const clicked = [];
-    const missed = [];
-
-    // Strategy A: find entry containers and look for a vote button inside
-    const containers = Array.from(document.querySelectorAll(
-      '[class*="entry"],[class*="contestant"],[class*="nominee"],[class*="gallery-item"],[class*="card"],[class*="item"]'
-    ));
-
-    for (const [name, catName] of Object.entries(lookup)) {
-      let found = false;
-      for (const container of containers) {
-        const text = container.textContent?.trim().toLowerCase() || '';
-        if (!text.includes(name)) continue;
-
-        // Found a container matching this entry — look for a vote button inside
-        const voteBtn = container.querySelector(
-          'button, [role="button"], [class*="vote"], [class*="select"], [class*="choose"]'
-        );
-        if (voteBtn) {
-          try {
-            voteBtn.scrollIntoView({ behavior: 'instant', block: 'center' });
-            voteBtn.click();
-            clicked.push({ name, catName, btnText: voteBtn.textContent?.trim(), btnCls: voteBtn.className });
-            found = true;
-          } catch (e) {
-            missed.push({ name, reason: e.message });
-          }
-          break;
-        }
-      }
-
-      // Strategy B: text-node walk to find entry name, then bubble up to find a button
-      if (!found) {
-        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-        let node;
-        while ((node = walker.nextNode())) {
-          if (node.textContent?.trim().toLowerCase() !== name) continue;
-          let el = node.parentElement;
-          for (let depth = 0; depth < 7; depth++) {
-            if (!el) break;
-            const btn = el.querySelector('button, [role="button"]');
-            if (btn) {
-              try {
-                btn.scrollIntoView({ behavior: 'instant', block: 'center' });
-                btn.click();
-                clicked.push({ name, catName, btnText: btn.textContent?.trim(), btnCls: btn.className, strategy: 'B' });
-                found = true;
-              } catch (e) {
-                missed.push({ name, reason: e.message });
-              }
-              break;
-            }
-            el = el.parentElement;
-          }
-          break;
-        }
-        if (!found) missed.push({ name, reason: 'no container or button found' });
-      }
-    }
-
-    return { clicked, missed, containerCount: containers.length };
-  }, entryLookup);
-
-  log(job, `Gallery containers found: ${result.containerCount}`);
-  log(job, `Votes clicked: ${result.clicked.length}, missed: ${result.missed.length}`);
-  if (result.clicked.length > 0) {
-    for (const c of result.clicked.slice(0, 5)) {
-      log(job, `  ✓ "${c.name}" in "${c.catName}" (btn: "${c.btnText}" cls: "${c.btnCls}")`);
-    }
-  }
-  if (result.missed.length > 0) {
-    log(job, `  First missed: ${JSON.stringify(result.missed[0])}`);
-  }
-
-  return result.clicked.length;
-}
-
-async function submitBallot(frame, job) {
-  const submitSelectors = [
-    'button[type="submit"]',
-    'input[type="submit"]',
-    '[class*="submit"]',
-    '[class*="vote-btn"]',
-    '[class*="cast"]',
-  ];
-
-  for (const sel of submitSelectors) {
-    try {
-      const btn = await frame.$(sel);
-      if (btn) {
-        await btn.scrollIntoViewIfNeeded();
-        await btn.click();
-        return true;
-      }
-    } catch {}
-  }
-
-  for (const text of ['Submit', 'Vote', 'Cast My Vote', 'Submit Votes']) {
-    try {
-      await frame.getByRole('button', { name: text, exact: false }).click({ timeout: 2000 });
-      return true;
-    } catch {}
-  }
-
-  return false;
-}
 
 // ── PDF generation ───────────────────────────────────────────────────────────
 
@@ -641,8 +679,11 @@ function buildVotePlan(matchups, entries, groups) {
     .filter(m => (entriesByMatchup[m.id] || []).length > 0)
     .map(matchup => {
       const pool = entriesByMatchup[matchup.id] || [];
-      const libertyCafe = pool.find(e => e.name && e.name.toLowerCase().includes(TARGET_NAME));
-      const selectedEntry = libertyCafe || pool[Math.floor(Math.random() * pool.length)];
+      // Prefer active entries (status_type_id === 1) so the name matches what the ballot UI shows
+      const active = pool.filter(e => e.status_type_id === 1);
+      const searchPool = active.length > 0 ? active : pool;
+      const libertyCafe = searchPool.find(e => e.name && e.name.toLowerCase().includes(TARGET_NAME));
+      const selectedEntry = libertyCafe || searchPool[Math.floor(Math.random() * searchPool.length)];
       return {
         matchup,
         groupName: groupById[matchup.matchup_group_id] || `Group ${matchup.matchup_group_id}`,
