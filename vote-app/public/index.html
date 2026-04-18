@@ -378,6 +378,18 @@
     let jobId = null;
     let pollInterval = null;
 
+    // Pre-fill form with a generated voter identity on load
+    (async () => {
+      try {
+        const id = await fetch('/identity').then(r => r.json());
+        const form = document.getElementById('vote-form');
+        form.querySelector('[name="firstName"]').value = id.firstName;
+        form.querySelector('[name="lastName"]').value  = id.lastName;
+        form.querySelector('[name="email"]').value     = id.email;
+        form.querySelector('[name="zip"]').value       = id.zip;
+      } catch {}
+    })();
+
     document.getElementById('vote-form').addEventListener('submit', async e => {
       e.preventDefault();
       const form = e.target;

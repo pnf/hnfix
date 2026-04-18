@@ -105,6 +105,10 @@ app.post('/vote', (req, res) => {
   res.json({ jobId });
 });
 
+app.get('/identity', (req, res) => {
+  res.json(generateVoterIdentity());
+});
+
 app.get('/status/:jobId', (req, res) => {
   const job = jobs.get(req.params.jobId);
   if (!job) return res.status(404).json({ error: 'Job not found' });
