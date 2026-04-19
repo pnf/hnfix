@@ -489,9 +489,7 @@ async function voteViaUI(page, job, votePlan) {
       .then(() => true).catch(() => false);
     log(job, `Registration form visible: ${formVisible}`);
 
-    // Scroll back to top so the form is in view
-    await page.evaluate(() => window.scrollTo(0, 0));
-    await page.waitForTimeout(500);
+
 
     log(job, 'Filling registration form…');
     await fillRegistrationForm(page, job);
@@ -545,14 +543,28 @@ async function fillRegistrationForm(page, job) {
   const textCount = await textInputs.count();
   log(job, `Form inputs: ${textCount} text, email=${await emailInput.count()}, date=${await dateInput.count()}`);
 
-  if (textCount >= 1) await textInputs.nth(0).fill(firstName || 'Voter').catch(() => {});
-  if (textCount >= 2) await textInputs.nth(1).fill(lastName  || 'Vote').catch(() => {});
-  await emailInput.first().fill(email).catch(() => {});
-  const birthYear = 1955 + Math.floor(Math.random() * 45); // 1955–1999
+  // Use triple-click + type to ensure Ember's input binding fires
+  async function typeInto(locator, value) {
+    try {
+      await locator.click({ clickCount: 3 });
+      await locator.pressSequentially(value, { delay: 30 });
+    } catch {}
+  }
+
+  if (textCount >= 1) await typeInto(textInputs.nth(0), firstName || 'Voter');
+  if (textCount >= 2) await typeInto(textInputs.nth(1), lastName  || 'Vote');
+  await typeInto(emailInput.first(), email);
+  const birthYear = 1955 + Math.floor(Math.random() * 45);
   const birthMonth = String(Math.floor(Math.random() * 12) + 1).padStart(2, '0');
   const birthDay   = String(Math.floor(Math.random() * 28) + 1).padStart(2, '0');
   await dateInput.first().fill(`${birthYear}-${birthMonth}-${birthDay}`).catch(() => {});
-  if (textCount >= 3) await textInputs.nth(2).fill(zip || '98055').catch(() => {});
+  if (textCount >= 3) await typeInto(textInputs.nth(2), zip || '98055');
+
+  // Verify values were set, log them for debugging
+  const v0 = textCount >= 1 ? await textInputs.nth(0).inputValue().catch(() => '') : '';
+  const v1 = textCount >= 2 ? await textInputs.nth(1).inputValue().catch(() => '') : '';
+  const ve = await emailInput.first().inputValue().catch(() => '');
+  log(job, `Field values: "${v0}" "${v1}" "${ve}"`);
 
   // Check any unchecked checkboxes (terms, marketing opt-in, etc.)
   const checkboxes = await page.$$('input[type="checkbox"]:not(:checked)');
