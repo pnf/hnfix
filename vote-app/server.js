@@ -409,7 +409,12 @@ async function voteViaUI(page, job, votePlan) {
       }
     });
 
-    await page.goto(EMBED_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    const gotoResp = await page.goto(EMBED_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    const httpStatus = gotoResp ? gotoResp.status() : 0;
+    if (httpStatus >= 500) {
+      log(job, `Ballot page returned HTTP ${httpStatus} — 2nd Street service unavailable, try again later`);
+      return false;
+    }
     await page.waitForTimeout(5000);
 
     // Scroll incrementally to trigger lazy-loading
@@ -423,10 +428,30 @@ async function voteViaUI(page, job, votePlan) {
     });
     await page.waitForTimeout(1000);
 
-    const entryCount = await page.evaluate(() =>
+    // Wait for at least one entry to appear; retry scroll if none loaded
+    let entryCount = await page.evaluate(() =>
       document.querySelectorAll('.individual-entry-view').length
     );
+    if (entryCount === 0) {
+      log(job, 'No entries found after first scroll — retrying…');
+      await page.waitForSelector('.individual-entry-view', { timeout: 15000 }).catch(() => {});
+      await page.evaluate(async () => {
+        for (let i = 0; i < 60; i++) {
+          window.scrollBy(0, window.innerHeight);
+          await new Promise(r => setTimeout(r, 200));
+        }
+        window.scrollTo(0, 0);
+      });
+      await page.waitForTimeout(1000);
+      entryCount = await page.evaluate(() =>
+        document.querySelectorAll('.individual-entry-view').length
+      );
+    }
     log(job, `Entries in DOM: ${entryCount}`);
+    if (entryCount === 0) {
+      log(job, 'Ballot entries did not load — 2nd Street may be down or the page structure changed');
+      return false;
+    }
 
     // Build a name→index map once (avoids O(n²) DOM evaluations)
     log(job, 'Scanning ballot entries…');
